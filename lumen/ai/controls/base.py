@@ -22,6 +22,13 @@ from ...util import detect_file_encoding, normalize_table_name
 from ..utils import log_debug
 from .progress import Progress
 
+try:
+    from ...sources.xarray_sql import XArraySource
+    XARRAY_AVAILABLE = True
+except ImportError:
+    XARRAY_AVAILABLE = False
+
+XARRAY_EXTENSIONS = ("nc", "zarr")
 TABLE_EXTENSIONS = ("csv", "parquet", "parq", "json", "xlsx", "geojson", "wkt", "zip")
 
 METADATA_EXTENSIONS = ("md", "txt", "yaml", "yml", "json", "pdf", "docx", "doc", "pptx", "ppt")
@@ -572,6 +579,46 @@ class BaseSourceControls(Viewer):
         self._last_table = table
         return 1
 
+    def _add_xarray_table(self, card: UploadedFileRow):
+        """
+        Create an XArraySource from an uploaded NetCDF or Zarr file.
+
+        Because xarray-sql needs a real file path (not a bytes buffer),
+        we write the upload to a temporary file first.
+        """
+        import tempfile
+
+        extension = card.extension
+        table = card.alias
+        filename = f"{card.filename}.{extension}"
+
+        try:
+            card.file_obj.seek(0)
+            raw = card.file_obj.read()
+
+            # Write to a named temp file with the correct extension so xarray
+            # can detect the backend (netcdf4 / zarr)
+            suffix = f".{extension}"
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            tmp.write(raw)
+            tmp.flush()
+            tmp.close()
+            tmp_path = tmp.name
+
+            source_id = f"{self.source_name_prefix}{self._count:06d}_xarray"
+            xarray_source = XArraySource(
+                name=source_id,
+                tables={table: tmp_path},
+            )
+            xarray_source.metadata[table] = {"filename": filename}
+            self.outputs["table"] = table
+            self._last_table = table
+            return xarray_source
+        except Exception as e:
+            self._error_placeholder.object += f"\\n⚠️ Error loading {filename!r}: {e}"
+            self._error_placeholder.visible = True
+            return None
+
     def _read_json_file(self, file: io.BytesIO | io.StringIO, filename: str) -> pd.DataFrame:
         file.seek(0)
         content = file.read()
@@ -732,6 +779,7 @@ class BaseSourceControls(Viewer):
 
         for card in data_cards:
             log_debug(f"Processing data card: {card.filename}.{card.extension} (alias: {card.alias})")
+            import sys; print(f"[DEBUG] ext={card.extension!r} xarray={card.extension.endswith(XARRAY_EXTENSIONS)} table={card.extension.endswith(TABLE_EXTENSIONS)} custom={card.extension.endswith(custom_table_extensions)}", file=sys.stderr, flush=True)
             if card.extension.endswith(custom_table_extensions):
                 source = table_upload_callbacks[card.extension](
                     self.context, card.file_obj, card.alias, card.filename
@@ -739,6 +787,19 @@ class BaseSourceControls(Viewer):
                 if source is not None:
                     n_tables += len(source.get_tables())
                     self._register_source_output(source)
+                    self.param.trigger("outputs")
+            elif card.extension.endswith(XARRAY_EXTENSIONS):
+                if not XARRAY_AVAILABLE:
+                    self._error_placeholder.object += (
+                        f"\\n⚠️ Skipped '{card.filename}.{card.extension}': "
+                        "xarray-sql is not installed. Run: pip install lumen[xarray]"
+                    )
+                    self._error_placeholder.visible = True
+                    continue
+                xarray_source = self._add_xarray_table(card)
+                if xarray_source is not None:
+                    n_tables += len(xarray_source.get_tables())
+                    self._register_source_output(xarray_source)
                     self.param.trigger("outputs")
             elif card.extension.endswith(TABLE_EXTENSIONS):
                 if source is None:
@@ -751,7 +812,7 @@ class BaseSourceControls(Viewer):
                 source.metadata[table_name]["filename"] = filename
                 n_tables += self._add_table(source, card.file_obj, card)
             else:
-                self._error_placeholder.object += f"\\n⚠️ Skipped '{card.filename}.{card.extension}': unsupported format."
+                self._error_placeholder.object += f"\\n⚠️ Skipped '{card.filename}.{card.extension}': unsupported format. Supported: {', '.join(TABLE_EXTENSIONS + XARRAY_EXTENSIONS)}."
                 self._error_placeholder.visible = True
 
         for card in metadata_cards:

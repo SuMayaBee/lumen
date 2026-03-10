@@ -61,6 +61,51 @@ from .vector_store import VectorStore
 
 DataT = str | Path | Source | Pipeline
 
+
+def _xarray_upload_handler(context, file_obj, alias: str, filename: str):
+    """
+    Upload handler for NetCDF (.nc) and Zarr (.zarr) files.
+
+    Registered as an upload_handler in ExplorerUI so it is called with
+    the highest priority in BaseSourceControls._process_files().
+
+    Writes the uploaded bytes to a temp file (xarray-sql needs a real path),
+    then creates and returns an XArraySource.
+    """
+    import tempfile
+
+    try:
+        from ..sources.xarray_sql import XArraySource
+    except ImportError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "XArraySource requires xarray-sql: pip install lumen[xarray]"
+        )
+        return None
+
+    extension = filename.rsplit('.', 1)[-1].lower() if '.' in filename else 'nc'
+    suffix = f'.{extension}'
+
+    try:
+        file_obj.seek(0)
+        raw = file_obj.read()
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp.write(raw)
+        tmp.flush()
+        tmp.close()
+
+        source = XArraySource(
+            name=f"XArray_{alias}",
+            tables={alias: tmp.name},
+        )
+        source.metadata[alias] = {'filename': f'{filename}'}
+        return source
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("Failed to load xarray file %r: %s", filename, e)
+        return None
+
 PAGE_SX = {
     ".sidebar": {"transition": "width 0.2s ease-in-out"},
     ".sidebar:hover": {"width": "140px", "transitionDelay": "0.5s"},
@@ -449,11 +494,13 @@ class UI(Viewer):
     suggestions = param.List(default=GETTING_STARTED_SUGGESTIONS, doc="""
         Initial list of suggestions of actions the user can take.""")
 
-    upload_handlers = param.Dict(default={}, doc="""
-        Dictionary mapping from file extensions to handler function,
-        e.g. {"hdf5": ...}. The callback function should accept the file bytes,
-        table alias, and filename, add or modify the `sources` in memory, and return a bool
-        (True if the table was successfully uploaded).""")
+    upload_handlers = param.Dict(
+        default={'.nc': _xarray_upload_handler, '.zarr': _xarray_upload_handler},
+        doc="""
+        Dictionary mapping file extensions to handler functions.
+        Defaults include handlers for NetCDF (.nc) and Zarr (.zarr) via XArraySource.
+        Add entries like {".hdf5": my_handler} to support more formats.
+        Handler signature: (context, file_obj, alias, filename) -> Source | None""")
 
     title = param.String(default='Lumen UI', doc="Title of the app.")
 
@@ -1206,7 +1253,7 @@ class UI(Viewer):
         self._source_content = Tabs(*control_tabs, sizing_mode="stretch_width")
 
         self._sources_help_caption = Typography(
-            "Add data to explore with Lumen AI. Supports CSV, Parquet, JSON, Excel, and databases. "
+            "Add data to explore with Lumen AI. Supports CSV, Parquet, JSON, Excel, NetCDF, Zarr, and databases. "
             "Select between data / metadata and set an alias.",
             variant="body2",
             color="text.secondary",

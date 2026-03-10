@@ -45,7 +45,7 @@ class ErrorDescription(BaseModel):
 
     explanation: str = Field(
         description="A brief description of the error suitable for a non-technical user.",
-        max_length=300
+        max_length=1000
     )
 class YesNo(BaseModel):
 

@@ -166,9 +166,16 @@ def path_representer(dumper, data):
 
 def numpy_representer(dumper, data):
     """Convert numpy types to native Python types for YAML serialization."""
-    if hasattr(data, 'item'):  # Scalar types (integers, floats, bools)
+    if hasattr(data, 'ndim') and data.ndim == 0:
+        # Zero-dimensional array (scalar wrapped in ndarray)
         return dumper.represent_data(data.item())
-    elif hasattr(data, 'tolist'):  # Arrays
+    elif hasattr(data, 'size') and data.size == 1 and not hasattr(data, '__len__'):
+        # Numpy scalar types (np.int64, np.float64, etc.)
+        return dumper.represent_data(data.item())
+    elif isinstance(data, np.generic):
+        # Any numpy scalar (np.int64, np.float32, np.bool_, etc.)
+        return dumper.represent_data(data.item())
+    elif hasattr(data, 'tolist'):  # Multi-element arrays
         return dumper.represent_list(data.tolist())
     return dumper.represent_data(data)
 

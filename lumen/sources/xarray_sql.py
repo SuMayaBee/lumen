@@ -97,6 +97,7 @@ class XArraySource(BaseSQLSource):
         super().__init__(**params)
         self._ctx = XarrayContext()
         self._datasets: dict[str, xr.Dataset] = {}
+        self._sql_expressions: dict[str, str] = {}
         self._register_tables()
 
     def _register_tables(self):
@@ -129,10 +130,16 @@ class XArraySource(BaseSQLSource):
         return ['tables', 'chunks', 'engine']
 
     def get_tables(self) -> list[str]:
-        return [t for t in list(self.tables) if not self._is_table_excluded(t)]
+        tables = [t for t in list(self.tables) if not self._is_table_excluded(t)]
+        tables.extend(
+            t for t in self._sql_expressions if not self._is_table_excluded(t)
+        )
+        return tables
 
     def get_sql_expr(self, table: str | dict) -> str:
         """Returns the SQL expression for a table."""
+        if table in self._sql_expressions:
+            return self._sql_expressions[table]
         if isinstance(self.tables, dict):
             if table not in self.tables:
                 raise KeyError(f"Table {table!r} not found in {list(self.tables.keys())}")
@@ -178,14 +185,25 @@ class XArraySource(BaseSQLSource):
         schemas = {}
         tables = self.get_tables() if table is None else [table]
         for name in tables:
-            ds = self._datasets[name]
-            prop_schema = {}
-            # Coordinates (filterable dimensions)
-            for coord_name, coord in ds.coords.items():
-                prop_schema[str(coord_name)] = self._coord_schema(coord)
-            # Data variables
-            for var_name, var in ds.data_vars.items():
-                prop_schema[str(var_name)] = self._var_schema(var)
+            if name in self._sql_expressions:
+                # For SQL expression tables, infer schema from query result
+                try:
+                    sql_expr = self._sql_expressions[name]
+                    limit_expr = SQLLimit(limit=1).apply(sql_expr)
+                    df = self.execute(limit_expr)
+                    schema = get_dataframe_schema(df)
+                    prop_schema = schema.get('items', {}).get('properties', {})
+                except Exception:
+                    prop_schema = {}
+            else:
+                ds = self._datasets[name]
+                prop_schema = {}
+                # Coordinates (filterable dimensions)
+                for coord_name, coord in ds.coords.items():
+                    prop_schema[str(coord_name)] = self._coord_schema(coord)
+                # Data variables
+                for var_name, var in ds.data_vars.items():
+                    prop_schema[str(var_name)] = self._var_schema(var)
             schemas[name] = prop_schema
         return schemas if table is None else schemas[table]
 
@@ -276,18 +294,28 @@ class XArraySource(BaseSQLSource):
         """
         Creates a new XArraySource with derived SQL expressions.
 
-        This re-uses the same XarrayContext and datasets but allows new
-        SQL expressions (e.g., from AI-generated queries) to be registered.
+        Reuses the already-loaded xarray datasets for existing tables and
+        stores new SQL expressions (e.g., from AI-generated queries) as
+        virtual tables that are executed against the xarray SQL context.
         """
-        # Merge existing tables with new ones
-        all_tables = dict(self.tables)
-        all_tables.update({
-            name: self.tables.get(name, expr)
-            for name, expr in tables.items()
-        })
+        # Separate real dataset tables from SQL expression tables
+        real_tables = {}
+        sql_expressions = {}
+
+        for name, value in tables.items():
+            if name in self._datasets:
+                # Pass the already-loaded Dataset to avoid re-opening files
+                real_tables[name] = self._datasets[name]
+            else:
+                # This is a SQL expression for a virtual table
+                sql_expressions[name] = value
+
+        # Include all original tables using their loaded datasets
+        all_real_tables = {name: ds for name, ds in self._datasets.items()}
+        all_real_tables.update(real_tables)
 
         source_params = {
-            'tables': all_tables,
+            'tables': all_real_tables,
             'chunks': self.chunks,
             'engine': self.engine,
         }
@@ -295,6 +323,7 @@ class XArraySource(BaseSQLSource):
         source_params.pop('name', None)
 
         source = type(self)(**source_params)
+        source._sql_expressions = sql_expressions
         return source
 
     def close(self):

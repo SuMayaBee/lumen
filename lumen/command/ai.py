@@ -242,6 +242,9 @@ class AIHandler(CodeHandler):
 
             path = Path(table_path)
             if not path.is_file():
+                # Zarr stores are directories, not files — treat them as valid
+                if path.is_dir() and path.suffix == '.zarr':
+                    continue
                 if path.exists():
                     raise ValueError(f"Table path is not a file: {table_path}")
                 raise FileNotFoundError(f"Table file not found: {table_path}")

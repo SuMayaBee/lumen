@@ -26,7 +26,7 @@ except ImportError:
 
 class XArraySource(BaseSQLSource):
     """
-    XArraySource provides a SQL interface to xarray datasets (NetCDF, Zarr).
+    XArraySource provides a SQL interface to xarray datasets (NetCDF, Zarr, HDF5, GRIB).
 
     It uses `xarray-sql <https://github.com/alxmrs/xarray-sql>`_ to register
     xarray datasets with a DataFusion-based SQL engine, allowing standard SQL
@@ -35,16 +35,26 @@ class XArraySource(BaseSQLSource):
     Each table maps to an xarray Dataset loaded from a file path or an in-memory
     dataset. Coordinates become queryable columns alongside data variables.
 
+    Supported formats (auto-detected from file extension):
+
+    - **NetCDF** (``.nc``, ``.nc4``, ``.netcdf``) — engine: ``netcdf4``
+    - **Zarr** (``.zarr``) — engine: ``zarr``
+    - **HDF5** (``.h5``, ``.hdf5``, ``.he5``) — engine: ``h5netcdf``
+    - **GRIB** (``.grib``, ``.grib2``, ``.grb``) — engine: ``cfgrib``
+    - **OpenDAP URLs** (``http://...``) — auto-detected by xarray
+    - **In-memory** ``xarray.Dataset`` objects
+
     Parameters
     ----------
     tables : dict
-        Dictionary mapping table names to file paths (NetCDF, Zarr, HDF5)
+        Dictionary mapping table names to file paths, remote URLs,
         or ``xarray.Dataset`` objects.
     chunks : dict
         Dask chunking to apply when opening datasets. Required for lazy loading
         of large files. Example: ``{'time': 24}``.
     engine : str
-        xarray backend engine for opening files.
+        Override the xarray backend engine. If None, auto-detected from
+        file extension.
 
     Examples
     --------
@@ -61,6 +71,12 @@ class XArraySource(BaseSQLSource):
     >>> import xarray as xr
     >>> ds = xr.tutorial.open_dataset('air_temperature')
     >>> source = XArraySource(tables={'air': ds}, chunks={'time': 24})
+
+    From a remote OpenDAP URL:
+
+    >>> source = XArraySource(
+    ...     tables={'sst': 'https://opendap.example.com/sst.nc'},
+    ... )
     """
 
     chunks = param.Dict(default={'time': 24}, doc="""
@@ -80,7 +96,8 @@ class XArraySource(BaseSQLSource):
 
     tables = param.ClassSelector(class_=(dict,), default={}, doc="""
         Dictionary mapping table names to file paths or xarray.Dataset objects.
-        Supported formats: .nc (NetCDF), .zarr, .h5, .hdf5.""")
+        Supported formats: .nc/.nc4/.netcdf (NetCDF), .zarr (Zarr),
+        .h5/.hdf5/.he5 (HDF5), .grib/.grib2/.grb (GRIB), or OpenDAP URLs.""")
 
     source_type: ClassVar[str] = 'xarray'
 
@@ -114,13 +131,28 @@ class XArraySource(BaseSQLSource):
         """Open a dataset from a file path or return an existing Dataset."""
         if isinstance(source, xr.Dataset):
             return source
-        # source is a file path string
+        # source is a file path string or remote URL
         path = str(source)
         kwargs = {}
         if self.engine:
             kwargs['engine'] = self.engine
-        elif path.endswith('.zarr'):
+        elif path.endswith('.zarr') or path.endswith('.zarr/'):
             kwargs['engine'] = 'zarr'
+        elif path.endswith(('.h5', '.hdf5', '.he5')):
+            kwargs['engine'] = 'h5netcdf'
+        elif path.endswith(('.grib', '.grib2', '.grb')):
+            # Import cfgrib to register it as an xarray backend plugin
+            try:
+                import cfgrib  # noqa: F401
+            except ImportError:
+                raise ImportError(
+                    "cfgrib is required to read GRIB files. "
+                    "Install it with: pip install cfgrib or pixi install"
+                )
+            kwargs['engine'] = 'cfgrib'
+        elif path.endswith(('.nc4', '.netcdf')):
+            kwargs['engine'] = 'netcdf4'
+        # For .nc and remote OpenDAP URLs, let xarray auto-detect
 
         ds = xr.open_dataset(path, chunks=self.chunks or None, **kwargs)
         return ds

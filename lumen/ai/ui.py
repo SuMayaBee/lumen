@@ -495,11 +495,23 @@ class UI(Viewer):
         Initial list of suggestions of actions the user can take.""")
 
     upload_handlers = param.Dict(
-        default={'.nc': _xarray_upload_handler, '.zarr': _xarray_upload_handler},
+        default={
+            '.nc': _xarray_upload_handler,
+            '.nc4': _xarray_upload_handler,
+            '.netcdf': _xarray_upload_handler,
+            '.zarr': _xarray_upload_handler,
+            '.h5': _xarray_upload_handler,
+            '.hdf5': _xarray_upload_handler,
+            '.he5': _xarray_upload_handler,
+            '.grib': _xarray_upload_handler,
+            '.grib2': _xarray_upload_handler,
+            '.grb': _xarray_upload_handler,
+        },
         doc="""
         Dictionary mapping file extensions to handler functions.
-        Defaults include handlers for NetCDF (.nc) and Zarr (.zarr) via XArraySource.
-        Add entries like {".hdf5": my_handler} to support more formats.
+        Defaults include handlers for NetCDF (.nc, .nc4, .netcdf), Zarr (.zarr),
+        HDF5 (.h5, .hdf5, .he5), and GRIB (.grib, .grib2, .grb) via XArraySource.
+        Add entries like {".custom": my_handler} to support more formats.
         Handler signature: (context, file_obj, alias, filename) -> Source | None""")
 
     title = param.String(default='Lumen UI', doc="Title of the app.")
@@ -641,6 +653,21 @@ class UI(Viewer):
                     remote = True
                 if src.endswith(('.parq', '.parquet', '.csv', '.json', '.tsv', '.jsonl', '.ndjson')):
                     table = src
+                elif src.endswith(('.nc', '.nc4', '.netcdf', '.zarr', '.h5', '.hdf5', '.he5', '.grib', '.grib2', '.grb')):
+                    try:
+                        from ..sources.xarray_sql import XArraySource
+                    except ImportError as e:
+                        raise ImportError(
+                            "XArraySource requires xarray and xarray-sql. "
+                            "Install them with: pip install lumen[xarray]"
+                        ) from e
+                    table_name = Path(src).stem
+                    source = XArraySource(
+                        name=table_name,
+                        tables={table_name: src},
+                    )
+                    sources.append(source)
+                    continue
                 else:
                     raise ValueError(
                         f"Could not determine how to load {src} file."

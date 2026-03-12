@@ -26,7 +26,7 @@ from panel.widgets import CodeEditor
 from panel_gwalker import GraphicWalker
 from panel_material_ui import (
     Alert, Button, Checkbox, CircularProgress, FileDownload, FlexBox,
-    FloatInput, IconButton, MenuButton, Tabs,
+    FloatInput, MenuButton, Tabs,
 )
 
 from ..base import Component
@@ -37,6 +37,7 @@ from ..views.base import Panel, Table, View
 from .analysis import Analysis
 from .config import FORMAT_ICONS, FORMAT_LABELS, VEGA_ZOOMABLE_MAP_ITEMS
 from .controls import AnnotationControls, CopyControls, RetryControls
+from .sql_execute import SQLExecute
 from .utils import describe_data, get_data
 
 if TYPE_CHECKING:
@@ -63,6 +64,7 @@ class LumenEditor(Viewer):
 
     _controls = [RetryControls, CopyControls]
     _label = "Result"
+    _show_spinner = True
 
     def __init__(self, **params):
         try:
@@ -249,7 +251,8 @@ class LumenEditor(Viewer):
             )
             return
 
-        yield CircularProgress(value=True, label="Rendering component...")
+        if getattr(self, "_show_spinner", True):
+            yield CircularProgress(value=True, label="Rendering component...")
 
         # Only use cache for serializable specs; non-serializable (spec=None) always re-render
         if self.spec is not None and self.spec in self._last_output:
@@ -594,6 +597,7 @@ class SQLEditor(LumenEditor):
 
     export_formats = ("sql", "csv", "xlsx")
     _label = "Table"
+    _show_spinner = False
 
     def _render_editor(self):
         self._editor = CodeEditor(
@@ -612,30 +616,8 @@ class SQLEditor(LumenEditor):
             if event.new != self._editor.value:
                 self._editor.value = event.new
         self.param.watch(on_spec_change, 'spec')
-        
-        def execute_sql(event):
-            if self._editor.value != self.spec:
-                self.spec = self._editor.value
-        
-        execute_button = IconButton(
-            icon="play_arrow",
-            description="Execute SQL",
-            size="small",
-            color="primary",
-            icon_size="1.2em",
-            on_click=execute_sql,
-            margin=0
-        )
-        
-        editor_container = Column(
-            self._editor,
-            Row(
-                execute_button,
-                styles={'position': 'absolute', 'top': '0px', 'right': '8px', 'z-index': '1000'}
-            ),
-            styles={'position': 'relative'},
-            sizing_mode="stretch_both"
-        )
+        execute_overlay = SQLExecute(view=self)
+        editor_container = Column(self._editor, execute_overlay, styles={"position": "relative"}, sizing_mode="stretch_both")
         
         self._icons = Row(
             *self.footer,

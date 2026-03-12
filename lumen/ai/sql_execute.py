@@ -26,7 +26,11 @@ class SQLExecute(Viewer):
             spec = getattr(self.view, "spec", None)
             if editor is None:
                 return
-            if editor.value != spec:
+            if editor.value == spec:
+                return
+            try:
+                editor.param.trigger("value")
+            except Exception:
                 self.view.spec = editor.value
 
         button = IconButton(

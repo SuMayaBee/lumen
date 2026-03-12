@@ -64,7 +64,6 @@ class LumenEditor(Viewer):
 
     _controls = [RetryControls, CopyControls]
     _label = "Result"
-    _show_spinner = True
 
     def __init__(self, **params):
         try:
@@ -251,8 +250,7 @@ class LumenEditor(Viewer):
             )
             return
 
-        if getattr(self, "_show_spinner", True):
-            yield CircularProgress(value=True, label="Rendering component...")
+        yield CircularProgress(value=True, label="Rendering component...")
 
         # Only use cache for serializable specs; non-serializable (spec=None) always re-render
         if self.spec is not None and self.spec in self._last_output:
@@ -597,7 +595,6 @@ class SQLEditor(LumenEditor):
 
     export_formats = ("sql", "csv", "xlsx")
     _label = "Table"
-    _show_spinner = False
 
     def _render_editor(self):
         self._editor = CodeEditor(
@@ -606,16 +603,14 @@ class SQLEditor(LumenEditor):
             theme="github_dark" if config.theme == "dark" else "github_light_default",
             sizing_mode="stretch_both",
             soft_tabs=True,
+            on_keyup=False,
             indent=2,
             margin=(0, 10),
             disabled=self.param.spec.rx.is_(None),
             styles={"border": "1px solid var(--border-color)"}
         )
-        
-        def on_spec_change(event):
-            if event.new != self._editor.value:
-                self._editor.value = event.new
-        self.param.watch(on_spec_change, 'spec')
+
+        self._editor.link(self, bidirectional=True, value="spec")
         execute_overlay = SQLExecute(view=self)
         editor_container = Column(self._editor, execute_overlay, styles={"position": "relative"}, sizing_mode="stretch_both")
         

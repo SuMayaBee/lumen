@@ -26,7 +26,7 @@ from panel.widgets import CodeEditor
 from panel_gwalker import GraphicWalker
 from panel_material_ui import (
     Alert, Button, Checkbox, CircularProgress, FileDownload, FlexBox,
-    FloatInput, MenuButton, Tabs,
+    FloatInput, IconButton, MenuButton, Tabs,
 )
 
 from ..base import Component
@@ -594,6 +594,59 @@ class SQLEditor(LumenEditor):
 
     export_formats = ("sql", "csv", "xlsx")
     _label = "Table"
+
+    def _render_editor(self):
+        self._editor = CodeEditor(
+            value=self.param.spec.rx.or_(f'{self.title} output could not be serialized and may therefore not be edited.'),
+            language=self.language,
+            theme="github_dark" if config.theme == "dark" else "github_light_default",
+            sizing_mode="stretch_both",
+            soft_tabs=True,
+            indent=2,
+            margin=(0, 10),
+            disabled=self.param.spec.rx.is_(None),
+            styles={"border": "1px solid var(--border-color)"}
+        )
+        
+        def on_spec_change(event):
+            if event.new != self._editor.value:
+                self._editor.value = event.new
+        self.param.watch(on_spec_change, 'spec')
+        
+        def execute_sql(event):
+            if self._editor.value != self.spec:
+                self.spec = self._editor.value
+        
+        execute_button = IconButton(
+            icon="play_arrow",
+            description="Execute SQL",
+            size="small",
+            color="primary",
+            icon_size="1.2em",
+            on_click=execute_sql,
+            margin=0
+        )
+        
+        editor_container = Column(
+            self._editor,
+            Row(
+                execute_button,
+                styles={'position': 'absolute', 'top': '0px', 'right': '8px', 'z-index': '1000'}
+            ),
+            styles={'position': 'relative'},
+            sizing_mode="stretch_both"
+        )
+        
+        self._icons = Row(
+            *self.footer,
+            margin=(0, 0, 5, 10)
+        )
+        return Column(
+            editor_container,
+            self._icons,
+            loading=self.param.loading,
+            sizing_mode="stretch_both"
+        )
 
     def export(self, fmt: str) -> str | bytes:
         super().export(fmt)

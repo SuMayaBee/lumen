@@ -14,7 +14,6 @@ import param
 import requests
 
 from jsonschema import Draft7Validator, ValidationError
-from PIL import Image
 from panel.config import config
 from panel.io import cache
 from panel.layout import Column, Row
@@ -29,6 +28,7 @@ from panel_material_ui import (
     Alert, Button, Checkbox, CircularProgress, FileDownload, FlexBox,
     FloatInput, MenuButton, Tabs,
 )
+from PIL import Image
 
 from ..base import Component
 from ..config import dump_yaml, load_yaml

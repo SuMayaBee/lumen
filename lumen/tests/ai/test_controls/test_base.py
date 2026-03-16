@@ -3,7 +3,6 @@ import json
 
 import pytest
 
-
 try:
     import lumen.ai  # noqa
 except ModuleNotFoundError:

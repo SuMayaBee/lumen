@@ -14,6 +14,7 @@ import param
 import requests
 
 from jsonschema import Draft7Validator, ValidationError
+from PIL import Image
 from panel.config import config
 from panel.io import cache
 from panel.layout import Column, Row
@@ -287,7 +288,7 @@ class VegaLiteEditor(LumenEditor):
 
     export_formats = ("yaml", "png", "jpeg", "pdf", "svg", "html", "webp", "tiff", "eps")
 
-    _PILLOW_FORMATS = ("webp", "tiff", "eps")
+    _pillow_formats = ("webp", "tiff", "eps")
 
     _controls = [RetryControls, AnnotationControls, CopyControls]
     _label = "Plot"
@@ -297,7 +298,8 @@ class VegaLiteEditor(LumenEditor):
         if ret is not None:
             return ret
 
-        render_fmt = "png" if fmt in self._PILLOW_FORMATS else fmt
+        # vl-convert doesn't support webp/tiff/eps; render as png first, then convert with Pillow
+        render_fmt = "png" if fmt in self._pillow_formats else fmt
         kwargs = {"scale": 2} if render_fmt in ("png", "jpeg", "pdf") else {}
 
         spec = load_yaml(self.spec)
@@ -308,8 +310,7 @@ class VegaLiteEditor(LumenEditor):
         with self.param.update(spec=dump_yaml(spec)):
             out = self.component.get_panel().export(render_fmt, **kwargs)
 
-        if fmt in self._PILLOW_FORMATS:
-            from PIL import Image
+        if fmt in self._pillow_formats:
             img = Image.open(BytesIO(out))
             if fmt == "eps":
                 img = img.convert("RGB")

@@ -6,7 +6,7 @@ from typing import Annotated, Any
 import param
 
 from ...sources.base import Source
-from ...sources.duckdb import DuckDBSource
+from ...sources.base import BaseSQLSource
 from ..config import PROMPTS_DIR, SOURCE_TABLE_SEPARATOR
 from ..context import ContextModel, TContext
 from ..llm import Message
@@ -187,15 +187,33 @@ class MetadataLookup(VectorLookupTool):
         provenance_chain: list[str] | None = None,
     ):
         """Fetch metadata for a table and return enriched entry for batch processing."""
-        async with self._semaphore:
-            source_metadata = self._raw_metadata[source.name]
-            if isinstance(source_metadata, asyncio.Task):
-                source_metadata = await source_metadata
+        import sys
+        print(f"[ENRICH_DEBUG] Starting _enrich_metadata for source={source.name}, table={table_name}", file=sys.stderr, flush=True)
+        try:
+            async with self._semaphore:
+                source_metadata = self._raw_metadata[source.name]
+                print(f"[ENRICH_DEBUG] raw_metadata type={type(source_metadata).__name__}, is_task={isinstance(source_metadata, asyncio.Task)}", file=sys.stderr, flush=True)
+                if isinstance(source_metadata, asyncio.Task):
+                    source_metadata = await source_metadata
+                    self._raw_metadata[source.name] = source_metadata
+            print(f"[ENRICH_DEBUG] Got metadata, keys={list(source_metadata.keys()) if isinstance(source_metadata, dict) else 'NOT_DICT'}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[ENRICH_DEBUG] EXCEPTION fetching metadata for {source.name}: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            log_debug(f"[MetadataLookup] Failed to fetch metadata for {source.name}: {e}")
+            # Fall back to synchronous metadata fetch
+            try:
+                source_metadata = source.get_metadata()
                 self._raw_metadata[source.name] = source_metadata
+                print(f"[ENRICH_DEBUG] Fallback succeeded, keys={list(source_metadata.keys())}", file=sys.stderr, flush=True)
+            except Exception as e2:
+                print(f"[ENRICH_DEBUG] Fallback ALSO FAILED for {source.name}: {type(e2).__name__}: {e2}", file=sys.stderr, flush=True)
+                log_debug(f"[MetadataLookup] Fallback metadata fetch also failed for {source.name}: {e2}")
+                return None
 
         table_name_key = next((key for key in (table_name.upper(), table_name.lower(), table_name) if key in source_metadata), None)
 
         if not table_name_key:
+            print(f"[ENRICH_DEBUG] Table name '{table_name}' NOT FOUND in metadata keys={list(source_metadata.keys())}", file=sys.stderr, flush=True)
             return None
         table_name = table_name_key
         vector_info = dict(source_metadata[table_name])
@@ -240,6 +258,8 @@ class MetadataLookup(VectorLookupTool):
                 enriched_text += f"\n- {key}: {value}"
 
         # Return the entry instead of upserting directly
+        import sys
+        print(f"[ENRICH_DEBUG] SUCCESS: returning entry for table={table_name}, text_len={len(enriched_text)}", file=sys.stderr, flush=True)
         return {"text": enriched_text, "metadata": vector_metadata}
 
     async def _update_vector_store(self, context: TContext):
@@ -293,14 +313,26 @@ class MetadataLookup(VectorLookupTool):
                 log_debug(f"[MetadataLookup] Processing source {source.name}")
 
             if self.include_metadata and self._raw_metadata.get(source.name) is None:
-                if isinstance(source, DuckDBSource):
-                    self._raw_metadata[source.name] = source.get_metadata()
+                import sys
+                if isinstance(source, BaseSQLSource):
+                    # SQL sources (DuckDB, XArray, etc.) have fast metadata access
+                    # and may not be thread-safe, so call synchronously.
+                    print(f"[SYNC_DEBUG] Fetching metadata SYNC for BaseSQLSource {source.name} (type={type(source).__name__})", file=sys.stderr, flush=True)
+                    try:
+                        self._raw_metadata[source.name] = source.get_metadata()
+                        print(f"[SYNC_DEBUG] Metadata fetched OK, keys={list(self._raw_metadata[source.name].keys())}", file=sys.stderr, flush=True)
+                    except Exception as e:
+                        print(f"[SYNC_DEBUG] SYNC metadata fetch FAILED: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+                        import traceback; traceback.print_exc(file=sys.stderr)
                 else:
+                    print(f"[SYNC_DEBUG] Fetching metadata via to_thread for {source.name} (type={type(source).__name__})", file=sys.stderr, flush=True)
                     metadata_task = asyncio.create_task(asyncio.to_thread(source.get_metadata))
                     self._raw_metadata[source.name] = metadata_task
                     tasks.append(metadata_task)
 
             tables = source.get_tables()
+            import sys
+            print(f"[SYNC_DEBUG] source={source.name}, tables={tables}, include_metadata={self.include_metadata}", file=sys.stderr, flush=True)
 
             if self.include_metadata:
                 for table in tables:
@@ -310,6 +342,7 @@ class MetadataLookup(VectorLookupTool):
                         )
                     )
                     tasks.append(task)
+                print(f"[SYNC_DEBUG] Created {len(tables)} enrich tasks, total tasks now={len(tasks)}", file=sys.stderr, flush=True)
             else:
                 await self.vector_store.upsert(
                     [{
@@ -391,7 +424,23 @@ class MetadataLookup(VectorLookupTool):
 
                 async def _gather_with_semaphore():
                     async with asyncio.Semaphore(self.max_concurrent):
-                        return [result for result in await asyncio.gather(*tasks, return_exceptions=True) if isinstance(result, dict) and "text" in result]
+                        import sys
+                        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+                        print(f"[READY_DEBUG] gather returned {len(raw_results)} results", file=sys.stderr, flush=True)
+                        enriched = []
+                        for i, result in enumerate(raw_results):
+                            if isinstance(result, BaseException):
+                                print(f"[READY_DEBUG] Task {i} FAILED: {type(result).__name__}: {result}", file=sys.stderr, flush=True)
+                                log_debug(f"[MetadataLookup] Task failed: {result}")
+                            elif isinstance(result, dict) and "text" in result:
+                                print(f"[READY_DEBUG] Task {i} OK: text_len={len(result['text'])}", file=sys.stderr, flush=True)
+                                enriched.append(result)
+                            elif result is None:
+                                print(f"[READY_DEBUG] Task {i} returned None (table not found in metadata?)", file=sys.stderr, flush=True)
+                            else:
+                                print(f"[READY_DEBUG] Task {i} returned unexpected: type={type(result).__name__}, value={str(result)[:100]}", file=sys.stderr, flush=True)
+                        print(f"[READY_DEBUG] enriched_entries count={len(enriched)}", file=sys.stderr, flush=True)
+                        return enriched
 
                 enriched_entries = await asyncio.wait_for(_gather_with_semaphore(), timeout=300)
             except TimeoutError:
@@ -513,21 +562,37 @@ class MetadataLookup(VectorLookupTool):
 
     async def _gather_info(self, messages: list[dict[str, str]], context: TContext) -> MetadataLookupOutputs:
         """Gather relevant information about the tables based on the user query."""
+        import sys
         query = messages[-1]["content"]
+        provenance = self._get_provenance_chain(context)
         query_filters = {
             "type": self._item_type_name,
-            "provenance_chain": self._get_provenance_chain(context),
         }
+        # Only filter by provenance_chain when at the root level.
+        # Exploration contexts have chains like ['global', 'exploration_XXX']
+        # but global tables are stored with ['global'] — the list-to-list
+        # filter requires ALL filter values in metadata, which wrongly
+        # excludes global tables.  visible_slugs handles visibility instead.
+        if len(provenance) == 1:
+            query_filters["provenance_chain"] = provenance
+        print(f"[GATHER_DEBUG] query={query[:60]!r}, filters={query_filters}, provenance={provenance}", file=sys.stderr, flush=True)
+        print(f"[GATHER_DEBUG] vector_store has {len(self.vector_store.vectors) if getattr(self.vector_store, 'vectors', None) is not None else 0} vectors", file=sys.stderr, flush=True)
+        print(f"[GATHER_DEBUG] vector_store texts={self.vector_store.texts[:3] if getattr(self.vector_store, 'texts', None) else '[]'}", file=sys.stderr, flush=True)
+        print(f"[GATHER_DEBUG] vector_store metadata={self.vector_store.metadata[:3] if getattr(self.vector_store, 'metadata', None) else '[]'}", file=sys.stderr, flush=True)
 
         # Count total number of tables available across all sources
         total_tables = 0
         for source in context.get("sources", []):
             total_tables += len(source.get_tables())
+        print(f"[GATHER_DEBUG] total_tables={total_tables}", file=sys.stderr, flush=True)
 
         # Skip query refinement if there are fewer than 5 tables
         if total_tables < 5:
             # Perform search without refinement
             results = await self.vector_store.query(query, top_k=self.n, filters=query_filters)
+            print(f"[GATHER_DEBUG] vector_store.query returned {len(results)} results", file=sys.stderr, flush=True)
+            for r in results:
+                print(f"[GATHER_DEBUG]   sim={r['similarity']:.3f} meta={r['metadata']}", file=sys.stderr, flush=True)
         else:
             results = await self._perform_search_with_refinement(query, context, filters=query_filters)
 
@@ -617,6 +682,19 @@ class MetadataLookup(VectorLookupTool):
         metaset = outputs.get("metaset")
         return str(metaset)
 
+    def _has_unsynced_sources(self, context: TContext) -> bool:
+        """Check if context contains sources not yet indexed in the vector store."""
+        sources = context.get("sources", [])
+        if not sources:
+            return False
+        vector_store_id = id(self.vector_store)
+        processed = self._sources_processed.get(vector_store_id, {})
+        in_progress = self._sources_in_progress.get(vector_store_id, set())
+        return any(
+            source.name not in processed and source.name not in in_progress
+            for source in sources
+        )
+
     async def respond(
         self,
         messages: list[Message],
@@ -626,8 +704,30 @@ class MetadataLookup(VectorLookupTool):
         """
         Fetches tables based on the user query and returns formatted context.
         """
+        import sys
+        print(f"[RESPOND_DEBUG] respond() called", file=sys.stderr, flush=True)
+        print(f"[RESPOND_DEBUG]   sources={[s.name for s in context.get('sources', [])]}", file=sys.stderr, flush=True)
+        print(f"[RESPOND_DEBUG]   tables_metadata_keys={list(context.get('tables_metadata', {}).keys())}", file=sys.stderr, flush=True)
+        print(f"[RESPOND_DEBUG]   has_unsynced={self._has_unsynced_sources(context)}", file=sys.stderr, flush=True)
+        print(f"[RESPOND_DEBUG]   pending_tasks={len(self._pending_update_tasks)}", file=sys.stderr, flush=True)
+        vs_id = id(self.vector_store)
+        print(f"[RESPOND_DEBUG]   vector_store_id={vs_id}, vectors={getattr(self.vector_store, 'vectors', None) is not None and len(self.vector_store.vectors) if getattr(self.vector_store, 'vectors', None) is not None else 'None'}", file=sys.stderr, flush=True)
+        print(f"[RESPOND_DEBUG]   _sources_processed={self._sources_processed.get(vs_id, {})}", file=sys.stderr, flush=True)
+
         await self._wait_for_pending_updates(timeout=30)
+
+        # On-demand sync: if context has sources that haven't been indexed
+        # yet (e.g. because coordinator.sync is still iterating other tools),
+        # index them now rather than returning an empty catalog.
+        if self._has_unsynced_sources(context):
+            print(f"[RESPOND_DEBUG] Triggering on-demand sync!", file=sys.stderr, flush=True)
+            if "tables_metadata" not in context:
+                context["tables_metadata"] = {}
+            await self._update_vector_store(context)
+
         out_model = await self._gather_info(messages, context)
+        metaset = out_model.get("metaset")
+        print(f"[RESPOND_DEBUG] _gather_info returned catalog_keys={list(metaset.catalog.keys()) if metaset else 'None'}", file=sys.stderr, flush=True)
         return [self._format_context(out_model)], out_model
 
     def _get_provenance_chain(self, context: TContext) -> list[str]:

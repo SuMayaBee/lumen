@@ -1170,6 +1170,14 @@ class ActorTask(ExecutableTask):
 
         messages = self._render_message_history(context)
         subcontext = merge_contexts(self.input_schema, [self.context, context])
+        import sys
+        actor_name = type(self.actor).__name__
+        print(f"[TASK_DEBUG] ActorTask._execute for {actor_name}", file=sys.stderr, flush=True)
+        print(f"[TASK_DEBUG]   input_schema={self.input_schema.__name__ if hasattr(self.input_schema, '__name__') else self.input_schema}", file=sys.stderr, flush=True)
+        print(f"[TASK_DEBUG]   self.context keys={list(self.context.keys())}", file=sys.stderr, flush=True)
+        print(f"[TASK_DEBUG]   passed context sources={[s.name for s in context.get('sources', [])]}", file=sys.stderr, flush=True)
+        print(f"[TASK_DEBUG]   subcontext sources={[s.name for s in subcontext.get('sources', [])]}", file=sys.stderr, flush=True)
+        print(f"[TASK_DEBUG]   subcontext keys={list(subcontext.keys())}", file=sys.stderr, flush=True)
         with self.actor.param.update(
             interface=self.interface,
             llm=self.actor.llm or self.llm,

@@ -843,9 +843,13 @@ class SQLAgent(BaseLumenAgent):
         step_title: str | None = None,
     ) -> tuple[list[Any], SQLOutputs]:
         """Execute SQL generation with table selection, then one-shot attempt, then exploration if needed."""
+        import sys
         sources = context["sources"]
         metaset = context["metaset"]
         selected_slugs = list(metaset.catalog)
+        print(f"[SQL_DEBUG] SQLAgent.respond: sources={[s.name for s in sources]}, catalog_keys={list(metaset.catalog.keys())}, n_slugs={len(selected_slugs)}", file=sys.stderr, flush=True)
+        print(f"[SQL_DEBUG]   context keys={list(context.keys())}", file=sys.stderr, flush=True)
+        print(f"[SQL_DEBUG]   tables_metadata={list(context.get('tables_metadata', {}).keys())}", file=sys.stderr, flush=True)
 
         if len(selected_slugs) > 3:
             with self._add_step(title="Selecting relevant tables...", steps_layout=self._steps_layout) as step:

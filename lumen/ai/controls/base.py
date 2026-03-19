@@ -779,7 +779,6 @@ class BaseSourceControls(Viewer):
 
         for card in data_cards:
             log_debug(f"Processing data card: {card.filename}.{card.extension} (alias: {card.alias})")
-            import sys; print(f"[DEBUG] ext={card.extension!r} xarray={card.extension.endswith(XARRAY_EXTENSIONS)} table={card.extension.endswith(TABLE_EXTENSIONS)} custom={card.extension.endswith(custom_table_extensions)}", file=sys.stderr, flush=True)
             if card.extension.endswith(custom_table_extensions):
                 source = table_upload_callbacks[card.extension](
                     self.context, card.file_obj, card.alias, card.filename

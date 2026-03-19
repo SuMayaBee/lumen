@@ -280,41 +280,66 @@ class XArraySource(BaseSQLSource):
         """Generate metadata from xarray dataset attributes and structure."""
         metadata = {}
         for table_name in tables:
-            ds = self._datasets[table_name]
-            # Build column metadata from coords + data_vars
-            columns = {}
-            for coord_name, coord in ds.coords.items():
-                columns[str(coord_name)] = {
-                    'data_type': str(coord.dtype),
-                    'description': coord.attrs.get('long_name', coord.attrs.get('standard_name', '')),
-                    'units': coord.attrs.get('units', ''),
-                    'kind': 'coordinate',
-                }
-            for var_name, var in ds.data_vars.items():
-                columns[str(var_name)] = {
-                    'data_type': str(var.dtype),
-                    'description': var.attrs.get('long_name', var.attrs.get('standard_name', '')),
-                    'units': var.attrs.get('units', ''),
-                    'kind': 'data_variable',
-                    'dimensions': list(var.dims),
-                }
+            if table_name in self._datasets:
+                ds = self._datasets[table_name]
+                # Build column metadata from coords + data_vars
+                columns = {}
+                for coord_name, coord in ds.coords.items():
+                    columns[str(coord_name)] = {
+                        'data_type': str(coord.dtype),
+                        'description': coord.attrs.get('long_name', coord.attrs.get('standard_name', '')),
+                        'units': coord.attrs.get('units', ''),
+                        'kind': 'coordinate',
+                    }
+                for var_name, var in ds.data_vars.items():
+                    columns[str(var_name)] = {
+                        'data_type': str(var.dtype),
+                        'description': var.attrs.get('long_name', var.attrs.get('standard_name', '')),
+                        'units': var.attrs.get('units', ''),
+                        'kind': 'data_variable',
+                        'dimensions': list(var.dims),
+                    }
 
-            # Count rows via SQL
-            try:
-                count_expr = SQLCount().apply(self.get_sql_expr(table_name))
-                count = self.execute(count_expr).iloc[0, 0]
-            except Exception:
-                count = None
+                # Count rows via SQL
+                try:
+                    count_expr = SQLCount().apply(self.get_sql_expr(table_name))
+                    count = self.execute(count_expr).iloc[0, 0]
+                except Exception:
+                    count = None
 
-            table_metadata = {
-                'description': ds.attrs.get('title', ds.attrs.get('description', '')),
-                'columns': columns,
-                'rows': count,
-                'dimensions': dict(ds.dims),
-                'global_attrs': dict(ds.attrs),
-                'updated_at': None,
-                'created_at': None,
-            }
+                table_metadata = {
+                    'description': ds.attrs.get('title', ds.attrs.get('description', '')),
+                    'columns': columns,
+                    'rows': count,
+                    'dimensions': dict(ds.sizes),
+                    'global_attrs': dict(ds.attrs),
+                    'updated_at': None,
+                    'created_at': None,
+                }
+            elif table_name in self._sql_expressions:
+                # SQL expression table (virtual/derived) — infer schema from query
+                try:
+                    sql_expr = self._sql_expressions[table_name]
+                    limit_expr = SQLLimit(limit=1).apply(sql_expr)
+                    df = self.execute(limit_expr)
+                    columns = {
+                        col: {'data_type': str(dtype), 'description': ''}
+                        for col, dtype in zip(df.columns, df.dtypes, strict=False)
+                    }
+                    count_expr = SQLCount().apply(sql_expr)
+                    count = self.execute(count_expr).iloc[0, 0]
+                except Exception:
+                    columns = {}
+                    count = None
+                table_metadata = {
+                    'description': '',
+                    'columns': columns,
+                    'rows': count,
+                    'updated_at': None,
+                    'created_at': None,
+                }
+            else:
+                continue
             metadata[table_name] = table_metadata
         return metadata
 

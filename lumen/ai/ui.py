@@ -1435,12 +1435,19 @@ class UI(Viewer):
         if "table" in context:
             global_context["table"] = context["table"]
 
+        # Sync coordinator first so MetadataLookup registers its update task
+        # in _pending_update_tasks before yielding to the event loop.
+        # This prevents a race where a concurrent query runs _wait_for_pending_updates
+        # and finds an empty task set, causing SQLAgent to see no sources.
+        import sys
+        print(f"[UI_SYNC_DEBUG] _sync_sources: sources={[s.name for s in global_context.get('sources', [])]}, has_coordinator={hasattr(self, '_coordinator')}", file=sys.stderr, flush=True)
+        if hasattr(self, '_coordinator') and global_context.get("sources"):
+            print(f"[UI_SYNC_DEBUG] Calling coordinator.sync...", file=sys.stderr, flush=True)
+            await self._coordinator.sync(global_context)
+            print(f"[UI_SYNC_DEBUG] coordinator.sync DONE. tables_metadata={list(global_context.get('tables_metadata', {}).keys())}", file=sys.stderr, flush=True)
         # Guard against early calls during init when components don't exist yet
         if hasattr(self, '_explorer'):
             await self._explorer.sync()
-        # Only sync coordinator if we have sources and coordinator exists
-        if hasattr(self, '_coordinator') and global_context.get("sources"):
-            await self._coordinator.sync(global_context)
 
         # Only update source catalog and input tabs for truly global sources
         if global_context is not self.context:
@@ -2587,6 +2594,11 @@ class ExplorerUI(UI):
             exploration = self._exploration['view']
             is_home = self._exploration['view'] is self._home
             context = dict(exploration.context)
+            import sys
+            print(f"[CHAT_DEBUG] _chat_invoke: exploration={type(exploration).__name__}, is_home={is_home}", file=sys.stderr, flush=True)
+            print(f"[CHAT_DEBUG]   context keys={list(context.keys())}", file=sys.stderr, flush=True)
+            print(f"[CHAT_DEBUG]   sources={[s.name for s in context.get('sources', [])]}", file=sys.stderr, flush=True)
+            print(f"[CHAT_DEBUG]   tables_metadata={list(context.get('tables_metadata', {}).keys())}", file=sys.stderr, flush=True)
             if not is_home:
                 context['prev_plan'] = exploration.plan
             plan = await self._coordinator.respond(messages, context)

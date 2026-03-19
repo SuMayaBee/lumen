@@ -49,8 +49,7 @@ dependencies = [
     "pydantic >=2.8.0",
     "pydantic-extra-types",
     "semchunk",
-    "sqlglot",
-    "sqlglotrs",
+    "sqlglot[c]",
     "tabulate",
     "tiktoken",
     "vl-convert-python",
@@ -78,6 +77,8 @@ chromadb = ['chromadb']
 bigquery = ['google-cloud-bigquery', 'sqlalchemy-bigquery']
 xarray = ['xarray', 'xarray-sql', 'netcdf4', 'zarr', 'h5netcdf']
 xarray-grib = ['cfgrib']
+snowflake = ['snowflake-connector-python', 'cryptography']
+ae5 = ['ae5-tools']
 mcp = ['fastmcp']
 
 [project.scripts]
@@ -186,3 +187,9 @@ multi_line_output = 5
 combine_as_imports = true
 lines_between_types = 1
 include_trailing_comma = true
+
+[tool.pyright]
+include = ["lumen/ai"]
+exclude = ["**/__pycache__"]
+reportMissingImports = false
+reportMissingTypeStubs = false

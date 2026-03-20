@@ -4,6 +4,7 @@ import pytest
 
 try:
     import xarray as xr
+    import xarray_sql  # noqa: F401
 
     from lumen.sources.xarray_sql import XArraySource
     pytestmark = pytest.mark.xdist_group("xarray")

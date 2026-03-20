@@ -67,6 +67,9 @@ zarr = "*"
 panel-splitjs = ">=0.3.2"
 panel-graphic-walker = ">=0.6.4"
 
+[feature.ai.pypi-dependencies]
+xarray-sql = "*"
+
 [feature.sql.dependencies]
 duckdb = "*"
 intake-sql = "*"

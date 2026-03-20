@@ -122,11 +122,13 @@ class XArraySource(BaseSQLSource):
         """Open datasets from file paths and register them with the SQL context."""
         for table_name, source in self.tables.items():
             ds = self._open_dataset(source)
-            # xarray-sql requires chunked datasets
+            # xarray-sql requires chunked datasets; only chunk along dims that
             if not ds.chunks:
-                ds = ds.chunk(self.chunks)
+                valid_chunks = {k: v for k, v in self.chunks.items() if k in ds.dims}
+                ds = ds.chunk(valid_chunks)
             self._datasets[table_name] = ds
-            self._ctx.from_dataset(table_name, ds, chunks=self.chunks)
+            valid_chunks = {k: v for k, v in self.chunks.items() if k in ds.dims}
+            self._ctx.from_dataset(table_name, ds, chunks=valid_chunks)
 
     def _open_dataset(self, source) -> xr.Dataset:
         """Open a dataset from a file path or return an existing Dataset."""

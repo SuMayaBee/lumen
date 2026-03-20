@@ -17,7 +17,7 @@ from ...pipeline import Pipeline
 from ...sources.base import BaseSQLSource, Source
 from ...sources.duckdb import DuckDBSource
 from ...transforms.sql import SQLLimit
-from ..config import PROMPTS_DIR, SOURCE_TABLE_SEPARATOR
+from ..config import PROMPTS_DIR, SOURCE_TABLE_SEPARATOR, RetriesExceededError
 from ..context import ContextModel, TContext
 from ..editors import LumenEditor, SQLEditor
 from ..llm import Message
@@ -419,16 +419,25 @@ class SQLAgent(BaseLumenAgent):
                     raise e
 
                 # Retry with LLM fix
+                sql_error = e
                 step.stream(f"\n\n⚠️ SQL validation failed (attempt {i+1}/{max_retries}): {e}")
                 feedback = f"{type(e).__name__}: {e!s}"
                 if "KeyError" in feedback:
                     feedback += " The data does not exist; select from available data sources."
 
-                retry_result = await self.revise(
-                    feedback, messages, context, spec=sql_query, language=f"sql.{source.dialect}",
-                    discovery_context=discovery_context
-                )
-                sql_query = clean_sql(retry_result, source.dialect, prettify=True)
+                try:
+                    retry_result = await self.revise(
+                        feedback, messages, context, spec=sql_query, language=f"sql.{source.dialect}",
+                        discovery_context=discovery_context
+                    )
+                    sql_query = clean_sql(retry_result, source.dialect, prettify=True)
+                except RetriesExceededError:
+                    # LLM could not produce valid edit instructions (e.g.
+                    # Gemini returning bare integers instead of edit objects).
+                    # Re-raise the original SQL error so the user sees what
+                    # actually went wrong instead of a cryptic retry error.
+                    step.stream("\n\n❌ LLM could not produce a valid SQL fix")
+                    raise sql_error
         return sql_query
 
     async def _execute_query(
@@ -843,13 +852,9 @@ class SQLAgent(BaseLumenAgent):
         step_title: str | None = None,
     ) -> tuple[list[Any], SQLOutputs]:
         """Execute SQL generation with table selection, then one-shot attempt, then exploration if needed."""
-        import sys
         sources = context["sources"]
         metaset = context["metaset"]
         selected_slugs = list(metaset.catalog)
-        print(f"[SQL_DEBUG] SQLAgent.respond: sources={[s.name for s in sources]}, catalog_keys={list(metaset.catalog.keys())}, n_slugs={len(selected_slugs)}", file=sys.stderr, flush=True)
-        print(f"[SQL_DEBUG]   context keys={list(context.keys())}", file=sys.stderr, flush=True)
-        print(f"[SQL_DEBUG]   tables_metadata={list(context.get('tables_metadata', {}).keys())}", file=sys.stderr, flush=True)
 
         if len(selected_slugs) > 3:
             with self._add_step(title="Selecting relevant tables...", steps_layout=self._steps_layout) as step:

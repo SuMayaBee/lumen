@@ -218,10 +218,6 @@ class Planner(Coordinator):
 
     async def _execute_planner_tools(self, messages: list[Message], context: TContext):
         """Execute planner tools to gather context before planning."""
-        import sys
-        print(f"[PLANNER_DEBUG] _execute_planner_tools: n_planner_tools={len(self.planner_tools)}", file=sys.stderr, flush=True)
-        print(f"[PLANNER_DEBUG]   context sources={[s.name for s in context.get('sources', [])]}", file=sys.stderr, flush=True)
-        print(f"[PLANNER_DEBUG]   context tables_metadata={list(context.get('tables_metadata', {}).keys())}", file=sys.stderr, flush=True)
         if not self.planner_tools:
             return
 
@@ -233,7 +229,6 @@ class Planner(Coordinator):
 
             for tool in self.planner_tools:
                 if not await tool.applies(context):
-                    print(f"[PLANNER_DEBUG] Tool {type(tool).__name__} does not apply, skipping", file=sys.stderr, flush=True)
                     continue
 
                 if tool.always_use:
@@ -242,11 +237,9 @@ class Planner(Coordinator):
                     is_relevant = await self._check_tool_relevance(tool, "", self, f"Gather context for planning to answer {user_query}", messages, context)
 
                 if not is_relevant:
-                    print(f"[PLANNER_DEBUG] Tool {type(tool).__name__} not relevant, skipping", file=sys.stderr, flush=True)
                     continue
 
                 tool_name = getattr(tool, "name", type(tool).__name__)
-                print(f"[PLANNER_DEBUG] Executing tool {tool_name} via ActorTask...", file=sys.stderr, flush=True)
                 step.stream(f"Using {tool_name} to gather planning context...")
                 task = ActorTask(
                     tool,
@@ -256,10 +249,6 @@ class Planner(Coordinator):
                     steps_layout=self.steps_layout,
                 )
                 outputs, out_context = await task.execute(context)
-                print(f"[PLANNER_DEBUG] Tool {tool_name} returned: status={task.status}, out_keys={list(out_context.keys()) if out_context else 'None'}", file=sys.stderr, flush=True)
-                if out_context and "metaset" in out_context:
-                    ms = out_context["metaset"]
-                    print(f"[PLANNER_DEBUG]   metaset catalog={list(ms.catalog.keys())}", file=sys.stderr, flush=True)
                 if task.status == "error":
                     step.stream(f"\n\n✗ Failed to gather context from {tool_name}")
                     continue
@@ -272,7 +261,6 @@ class Planner(Coordinator):
             if collected_contexts:
                 merged = merge_contexts(LWW, collected_contexts)
                 context.update(merged)
-                print(f"[PLANNER_DEBUG] After merge: context has metaset={('metaset' in context)}, catalog={list(context['metaset'].catalog.keys()) if 'metaset' in context else 'N/A'}", file=sys.stderr, flush=True)
                 step.stream(f"\n\nMerged context keys: {', '.join(f'`{k}`' for k in merged)}")
 
     async def _pre_plan(

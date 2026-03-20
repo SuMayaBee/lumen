@@ -29,6 +29,7 @@ ui.servable()
 |--------|---------|
 | Files | CSV, Parquet, JSON (local or URL) |
 | DuckDB | Local SQL queries on files |
+| XArray | NetCDF, Zarr, HDF5, GRIB scientific data |
 | Snowflake | Cloud data warehouse |
 | BigQuery | Google's data warehouse |
 | PostgreSQL | PostgreSQL via SQLAlchemy |
@@ -140,6 +141,93 @@ source = SQLAlchemySource(
 from lumen.sources.sqlalchemy import SQLAlchemySource
 
 source = SQLAlchemySource(url='sqlite:///data.db')
+```
+
+## Scientific data (xarray)
+
+Query multidimensional, labeled datasets (NetCDF, Zarr, HDF5, GRIB) using SQL. XArraySource uses [xarray-sql](https://github.com/alxmrs/xarray-sql) to register xarray datasets with a DataFusion SQL engine.
+
+**Install:**
+
+``` bash
+pip install lumen[xarray]
+```
+
+### From files
+
+``` py title="NetCDF file"
+from lumen.sources.xarray_sql import XArraySource
+import lumen.ai as lmai
+
+source = XArraySource(
+    tables={'weather': 'air_temperature.nc'},
+    chunks={'time': 24}
+)
+
+ui = lmai.ExplorerUI(data=source)
+ui.servable()
+```
+
+### Upload in the UI
+
+Drag and drop `.nc`, `.zarr`, `.h5`, `.hdf5`, or `.grib` files into the Lumen AI chat. They are automatically loaded as XArraySource tables.
+
+### Supported formats
+
+| Format | Extensions | Engine |
+|--------|-----------|--------|
+| NetCDF | `.nc`, `.nc4`, `.netcdf` | `netcdf4` (auto) |
+| Zarr | `.zarr` | `zarr` |
+| HDF5 | `.h5`, `.hdf5`, `.he5` | `h5netcdf` |
+| GRIB | `.grib`, `.grib2`, `.grb` | `cfgrib` (requires `pip install cfgrib`) |
+| OpenDAP | `http://...` URLs | auto-detected |
+
+### In-memory datasets
+
+``` py title="From xarray Dataset"
+import xarray as xr
+from lumen.sources.xarray_sql import XArraySource
+
+ds = xr.open_dataset('air_temperature.nc')
+source = XArraySource(tables={'air': ds}, chunks={'time': 24})
+```
+
+### Chunking for large files
+
+The `chunks` parameter controls Dask lazy loading. Without it, the entire dataset loads into memory.
+
+``` py title="Chunked loading" hl_lines="3"
+source = XArraySource(
+    tables={'climate': 'large_model_output.nc'},
+    chunks={'time': 48, 'lat': 50, 'lon': 50}
+)
+```
+
+### Metadata and CF conventions
+
+XArraySource automatically detects CF (Climate and Forecast) conventions:
+
+- **Latitude/longitude** coordinates identified by `standard_name`, `axis`, `units`, or name patterns
+- **CRS** extracted from `grid_mapping` variables or global attributes (defaults to WGS84 for lat/lon data)
+- **Temporal range** with resolution detection
+- **Spatial bounding box** for geographic data
+
+Access metadata programmatically:
+
+``` py
+metadata = source.get_metadata('weather')
+print(metadata['spatial_bounds'])   # {'lat_min': 15.0, 'lat_max': 75.0, ...}
+print(metadata['temporal_range'])   # {'start': '2013-01-01', 'end': '2014-12-31', ...}
+print(metadata['crs'])              # {'epsg': 'EPSG:4326', ...}
+print(metadata['chunk_info'])       # chunk sizes and total memory estimate
+```
+
+### Raw dataset access
+
+For advanced workflows (custom xarray operations, PyMC, scikit-learn):
+
+``` py
+ds = source.get_dataset('weather')  # returns xr.Dataset
 ```
 
 ## Advanced file handling

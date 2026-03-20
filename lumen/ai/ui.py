@@ -853,12 +853,9 @@ class UI(Viewer):
                 else:
                     main_content = self._splash
                 self._output[1:] = []
-            elif self._exploration_has_outputs(exploration):
+            else:
                 main_content = self._split
                 self._output[1:] = [exploration]
-            else:
-                main_content = self.interface
-                self._output[1:] = []
             self._current_mode = "Exploration"
             self._navigation_caption.object = EXPLORATION_CAPTION
 
@@ -934,6 +931,19 @@ class UI(Viewer):
                     # Clear uploads after processing
                     if self._upload_controls.clear_uploads:
                         self._upload_controls._clear_uploads()
+
+                # Synchronously sync uploaded sources into self.context so the
+                # query that fires below already sees them.  _sync_sources is
+                # async (it awaits coordinator.sync / explorer.sync) so it may
+                # not have run yet by the time _execute_pending_query_with sends
+                # the message to the chat callback.
+                outputs = self._upload_controls.outputs
+                if "source" in outputs:
+                    src = outputs["source"]
+                    ctx_sources = self.context.setdefault("sources", [])
+                    if src not in ctx_sources:
+                        ctx_sources.append(src)
+                    self.context["source"] = src
 
                 # Clear the chat input
                 with edit_readonly(self._chat_input):
@@ -1016,6 +1026,15 @@ class UI(Viewer):
         self._sources_dialog_content.open = False
 
         if query:
+            # Ensure sources are synced to context before firing the query
+            # (_sync_sources is async and may not have executed yet).
+            outputs = self._upload_controls.outputs
+            if "source" in outputs:
+                src = outputs["source"]
+                ctx_sources = self.context.setdefault("sources", [])
+                if src not in ctx_sources:
+                    ctx_sources.append(src)
+                self.context["source"] = src
             self._execute_pending_query_with(query, sources_snapshot)
 
     def _show_upload_success(self, n_tables: int, n_metadata: int):
@@ -1047,19 +1066,24 @@ class UI(Viewer):
                 views=[],
             )
 
-        # Build message with new sources info
+        # Build message with new sources info.
+        # IMPORTANT: Do NOT wrap in panel.layout.Column — the coordinator
+        # serializer only recognises panel_material_ui.Column, so a
+        # panel.layout.Column is serialised as its repr(), and the LLM
+        # ends up trying to "explain a Panel Column object" instead of
+        # answering the user's question.
         new_sources = [
             source for source in self.context.get("sources", [])
             if source not in old_sources
         ]
-        source_names = [f"**{src.name}**: {', '.join(src.get_tables())}" for src in new_sources]
-        source_view = Markdown(
-            "Added sources:\n" + "\n".join(f"- {name}" for name in source_names),
-            sizing_mode="stretch_width"
-        ) if new_sources else None
+        if new_sources:
+            source_names = [f"**{src.name}**: {', '.join(src.get_tables())}" for src in new_sources]
+            source_text = "\n\nAdded sources:\n" + "\n".join(f"- {name}" for name in source_names)
+            msg = user_prompt + source_text
+        else:
+            msg = user_prompt
 
         self._update_main_view()
-        msg = Column(user_prompt, source_view) if source_view else user_prompt
         self.interface.send(msg, respond=True)
 
     def _on_sources_dialog_close(self, event):
@@ -1439,12 +1463,8 @@ class UI(Viewer):
         # in _pending_update_tasks before yielding to the event loop.
         # This prevents a race where a concurrent query runs _wait_for_pending_updates
         # and finds an empty task set, causing SQLAgent to see no sources.
-        import sys
-        print(f"[UI_SYNC_DEBUG] _sync_sources: sources={[s.name for s in global_context.get('sources', [])]}, has_coordinator={hasattr(self, '_coordinator')}", file=sys.stderr, flush=True)
         if hasattr(self, '_coordinator') and global_context.get("sources"):
-            print(f"[UI_SYNC_DEBUG] Calling coordinator.sync...", file=sys.stderr, flush=True)
             await self._coordinator.sync(global_context)
-            print(f"[UI_SYNC_DEBUG] coordinator.sync DONE. tables_metadata={list(global_context.get('tables_metadata', {}).keys())}", file=sys.stderr, flush=True)
         # Guard against early calls during init when components don't exist yet
         if hasattr(self, '_explorer'):
             await self._explorer.sync()
@@ -2594,11 +2614,6 @@ class ExplorerUI(UI):
             exploration = self._exploration['view']
             is_home = self._exploration['view'] is self._home
             context = dict(exploration.context)
-            import sys
-            print(f"[CHAT_DEBUG] _chat_invoke: exploration={type(exploration).__name__}, is_home={is_home}", file=sys.stderr, flush=True)
-            print(f"[CHAT_DEBUG]   context keys={list(context.keys())}", file=sys.stderr, flush=True)
-            print(f"[CHAT_DEBUG]   sources={[s.name for s in context.get('sources', [])]}", file=sys.stderr, flush=True)
-            print(f"[CHAT_DEBUG]   tables_metadata={list(context.get('tables_metadata', {}).keys())}", file=sys.stderr, flush=True)
             if not is_home:
                 context['prev_plan'] = exploration.plan
             plan = await self._coordinator.respond(messages, context)

@@ -5,8 +5,7 @@ from typing import Annotated, Any
 
 import param
 
-from ...sources.base import Source
-from ...sources.base import BaseSQLSource
+from ...sources.base import BaseSQLSource, Source
 from ..config import PROMPTS_DIR, SOURCE_TABLE_SEPARATOR
 from ..context import ContextModel, TContext
 from ..llm import Message
@@ -535,7 +534,6 @@ class MetadataLookup(VectorLookupTool):
 
     async def _gather_info(self, messages: list[dict[str, str]], context: TContext) -> MetadataLookupOutputs:
         """Gather relevant information about the tables based on the user query."""
-        import sys
         query = messages[-1]["content"]
         provenance = self._get_provenance_chain(context)
         query_filters = {

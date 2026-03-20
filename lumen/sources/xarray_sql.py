@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import os
 import re
 
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -10,15 +9,18 @@ import numpy as np
 import pandas as pd
 import param
 
-from ..transforms.sql import SQLCount, SQLFilter, SQLLimit, SQLSelectFrom
+from ..transforms.sql import (
+    SQLCount, SQLFilter, SQLLimit, SQLSelectFrom,
+)
 from ..util import get_dataframe_schema
-from .base import BaseSQLSource, Source, cached, cached_schema
+from .base import BaseSQLSource, cached, cached_schema
 
 if TYPE_CHECKING:
     pass
 
 try:
     import xarray as xr
+
     from xarray_sql import XarrayContext
     XARRAY_AVAILABLE = True
 except ImportError:
@@ -139,7 +141,7 @@ class XArraySource(BaseSQLSource):
         kwargs = {}
         if self.engine:
             kwargs['engine'] = self.engine
-        elif path.endswith('.zarr') or path.endswith('.zarr/'):
+        elif path.endswith(('.zarr', '.zarr/')):
             kwargs['engine'] = 'zarr'
         elif path.endswith(('.h5', '.hdf5', '.he5')):
             kwargs['engine'] = 'h5netcdf'
@@ -147,11 +149,11 @@ class XArraySource(BaseSQLSource):
             # Import cfgrib to register it as an xarray backend plugin
             try:
                 import cfgrib  # noqa: F401
-            except ImportError:
+            except ImportError as e:
                 raise ImportError(
                     "cfgrib is required to read GRIB files. "
                     "Install it with: pip install cfgrib or pixi install"
-                )
+                ) from e
             kwargs['engine'] = 'cfgrib'
         elif path.endswith(('.nc4', '.netcdf')):
             kwargs['engine'] = 'netcdf4'

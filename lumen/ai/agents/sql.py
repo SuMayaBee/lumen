@@ -437,7 +437,7 @@ class SQLAgent(BaseLumenAgent):
                     # Re-raise the original SQL error so the user sees what
                     # actually went wrong instead of a cryptic retry error.
                     step.stream("\n\n❌ LLM could not produce a valid SQL fix")
-                    raise sql_error
+                    raise sql_error from None
         return sql_query
 
     async def _execute_query(

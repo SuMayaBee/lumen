@@ -854,8 +854,14 @@ class UI(Viewer):
                     main_content = self._splash
                 self._output[1:] = []
             else:
-                main_content = self._split
-                self._output[1:] = [exploration]
+                tabs = exploration.view[0]
+                if len(tabs) == 0:
+                    # Chat-only exploration: no data views, stay on interface
+                    main_content = self.interface
+                    self._output[1:] = []
+                else:
+                    main_content = self._split
+                    self._output[1:] = [exploration]
             self._current_mode = "Exploration"
             self._navigation_caption.object = EXPLORATION_CAPTION
 
@@ -1066,25 +1072,8 @@ class UI(Viewer):
                 views=[],
             )
 
-        # Build message with new sources info.
-        # IMPORTANT: Do NOT wrap in panel.layout.Column — the coordinator
-        # serializer only recognises panel_material_ui.Column, so a
-        # panel.layout.Column is serialised as its repr(), and the LLM
-        # ends up trying to "explain a Panel Column object" instead of
-        # answering the user's question.
-        new_sources = [
-            source for source in self.context.get("sources", [])
-            if source not in old_sources
-        ]
-        if new_sources:
-            source_names = [f"**{src.name}**: {', '.join(src.get_tables())}" for src in new_sources]
-            source_text = "\n\nAdded sources:\n" + "\n".join(f"- {name}" for name in source_names)
-            msg = user_prompt + source_text
-        else:
-            msg = user_prompt
-
+        self.interface.send(user_prompt, respond=True)
         self._update_main_view()
-        self.interface.send(msg, respond=True)
 
     def _on_sources_dialog_close(self, event):
         """Handle sources dialog close - restore pending query to input if user closed without adding files."""

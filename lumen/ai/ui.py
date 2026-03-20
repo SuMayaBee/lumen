@@ -1459,15 +1459,17 @@ class UI(Viewer):
         if "table" in context:
             global_context["table"] = context["table"]
 
-        # Sync coordinator first so MetadataLookup registers its update task
+        # Guard against early calls during init when components don't exist yet.
+        # Only sync the explorer with the global/top-level context so that
+        # per-exploration derived sources don't pollute the table-selection UI.
+        if hasattr(self, '_explorer') and global_context is self.context:
+            await self._explorer.sync(global_context)
+        # Sync coordinator so MetadataLookup registers its update task
         # in _pending_update_tasks before yielding to the event loop.
         # This prevents a race where a concurrent query runs _wait_for_pending_updates
         # and finds an empty task set, causing SQLAgent to see no sources.
         if hasattr(self, '_coordinator') and global_context.get("sources"):
             await self._coordinator.sync(global_context)
-        # Guard against early calls during init when components don't exist yet
-        if hasattr(self, '_explorer'):
-            await self._explorer.sync()
 
         # Only update source catalog and input tabs for truly global sources
         if global_context is not self.context:

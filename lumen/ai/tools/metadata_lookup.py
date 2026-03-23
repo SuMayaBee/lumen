@@ -5,7 +5,8 @@ from typing import Annotated, Any
 
 import param
 
-from ...sources.base import BaseSQLSource, Source
+from ...sources.base import Source
+from ...sources.duckdb import DuckDBSource
 from ..config import PROMPTS_DIR, SOURCE_TABLE_SEPARATOR
 from ..context import ContextModel, TContext
 from ..llm import Message
@@ -14,6 +15,13 @@ from ..schemas import (
 )
 from ..utils import log_debug
 from .vector_lookup import VectorLookupTool, make_refined_query_model
+
+_SYNC_METADATA_SOURCES = (DuckDBSource,)
+try:
+    from ...sources.xarray_sql import XArraySource
+    _SYNC_METADATA_SOURCES = (DuckDBSource, XArraySource)
+except ImportError:
+    pass
 
 
 class MetadataLookupInputs(ContextModel):
@@ -186,21 +194,11 @@ class MetadataLookup(VectorLookupTool):
         provenance_chain: list[str] | None = None,
     ):
         """Fetch metadata for a table and return enriched entry for batch processing."""
-        try:
-            async with self._semaphore:
-                source_metadata = self._raw_metadata[source.name]
-                if isinstance(source_metadata, asyncio.Task):
-                    source_metadata = await source_metadata
-                    self._raw_metadata[source.name] = source_metadata
-        except Exception as e:
-            log_debug(f"[MetadataLookup] Failed to fetch metadata for {source.name}: {e}")
-            # Fall back to synchronous metadata fetch
-            try:
-                source_metadata = source.get_metadata()
+        async with self._semaphore:
+            source_metadata = self._raw_metadata[source.name]
+            if isinstance(source_metadata, asyncio.Task):
+                source_metadata = await source_metadata
                 self._raw_metadata[source.name] = source_metadata
-            except Exception as e2:
-                log_debug(f"[MetadataLookup] Fallback metadata fetch also failed for {source.name}: {e2}")
-                return None
 
         table_name_key = next((key for key in (table_name.upper(), table_name.lower(), table_name) if key in source_metadata), None)
 
@@ -302,9 +300,9 @@ class MetadataLookup(VectorLookupTool):
                 log_debug(f"[MetadataLookup] Processing source {source.name}")
 
             if self.include_metadata and self._raw_metadata.get(source.name) is None:
-                if isinstance(source, BaseSQLSource):
-                    # SQL sources (DuckDB, XArray, etc.) have fast metadata access
-                    # and may not be thread-safe, so call synchronously.
+                if isinstance(source, _SYNC_METADATA_SOURCES):
+                    # Fast in-process sources (DuckDB, XArray) — call synchronously
+                    # to avoid thread-safety issues.
                     try:
                         self._raw_metadata[source.name] = source.get_metadata()
                     except Exception:

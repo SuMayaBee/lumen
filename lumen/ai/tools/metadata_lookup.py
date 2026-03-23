@@ -518,17 +518,10 @@ class MetadataLookup(VectorLookupTool):
     async def _gather_info(self, messages: list[dict[str, str]], context: TContext) -> MetadataLookupOutputs:
         """Gather relevant information about the tables based on the user query."""
         query = messages[-1]["content"]
-        provenance = self._get_provenance_chain(context)
         query_filters = {
             "type": self._item_type_name,
+            "provenance_chain": self._get_provenance_chain(context),
         }
-        # Only filter by provenance_chain when at the root level.
-        # Exploration contexts have chains like ['global', 'exploration_XXX']
-        # but global tables are stored with ['global'] — the list-to-list
-        # filter requires ALL filter values in metadata, which wrongly
-        # excludes global tables.  visible_slugs handles visibility instead.
-        if len(provenance) == 1:
-            query_filters["provenance_chain"] = provenance
 
         # Count total number of tables available across all sources
         total_tables = 0

@@ -16,13 +16,10 @@ from ..schemas import (
 from ..utils import log_debug
 from .vector_lookup import VectorLookupTool, make_refined_query_model
 
-_SYNC_METADATA_SOURCES = (DuckDBSource,)
 try:
     from ...sources.xarray_sql import XArraySource
-    _SYNC_METADATA_SOURCES = (DuckDBSource, XArraySource)
 except ImportError:
-    pass
-
+    XArraySource = None
 
 class MetadataLookupInputs(ContextModel):
     sources: Annotated[list[Source], ("accumulate", "source")]
@@ -300,13 +297,10 @@ class MetadataLookup(VectorLookupTool):
                 log_debug(f"[MetadataLookup] Processing source {source.name}")
 
             if self.include_metadata and self._raw_metadata.get(source.name) is None:
-                if isinstance(source, _SYNC_METADATA_SOURCES):
+                if isinstance(source, DuckDBSource) or (XArraySource is not None and isinstance(source, XArraySource)):
                     # Fast in-process sources (DuckDB, XArray) — call synchronously
                     # to avoid thread-safety issues.
-                    try:
-                        self._raw_metadata[source.name] = source.get_metadata()
-                    except Exception:
-                        pass
+                    self._raw_metadata[source.name] = source.get_metadata()
                 else:
                     metadata_task = asyncio.create_task(asyncio.to_thread(source.get_metadata))
                     self._raw_metadata[source.name] = metadata_task

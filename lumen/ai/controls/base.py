@@ -31,7 +31,6 @@ except ImportError:
 
 XARRAY_EXTENSIONS = ("nc", "zarr")
 TABLE_EXTENSIONS = ("csv", "parquet", "parq", "json", "xlsx", "geojson", "wkt", "zip")
-SUPPORTED_DATA_EXTENSIONS = TABLE_EXTENSIONS + XARRAY_EXTENSIONS
 
 METADATA_EXTENSIONS = ("md", "txt", "yaml", "yml", "json", "pdf", "docx", "doc", "pptx", "ppt")
 METADATA_FILENAME_PATTERNS = ("_metadata", "metadata_", "readme", "schema")
@@ -807,7 +806,7 @@ class BaseSourceControls(Viewer):
 
         for card in data_cards:
             log_debug(f"Processing data card: {card.filename}.{card.extension} (alias: {card.alias})")
-            if card.extension in custom_table_extensions:
+            if card.extension.endswith(custom_table_extensions):
                 source = table_upload_callbacks[card.extension](
                     self.context, card.file_obj, card.alias, card.filename
                 )
@@ -815,7 +814,7 @@ class BaseSourceControls(Viewer):
                     n_tables += len(source.get_tables())
                     self._register_source_output(source)
                     self.param.trigger("outputs")
-            elif card.extension in XARRAY_EXTENSIONS:
+            elif card.extension.endswith(XARRAY_EXTENSIONS):
                 if not XARRAY_AVAILABLE:
                     self._error_placeholder.object += (
                         f"\\n⚠️ Skipped '{card.filename}.{card.extension}': "
@@ -828,7 +827,7 @@ class BaseSourceControls(Viewer):
                     n_tables += len(xarray_source.get_tables())
                     self._register_source_output(xarray_source)
                     self.param.trigger("outputs")
-            elif card.extension in TABLE_EXTENSIONS:
+            elif card.extension.endswith(TABLE_EXTENSIONS):
                 if source is None:
                     # Reuse existing ephemeral DuckDB source to keep all
                     # uploaded tables in one connection across chat uploads.
@@ -848,7 +847,7 @@ class BaseSourceControls(Viewer):
                 source.metadata[table_name]["filename"] = filename
                 n_tables += self._add_table(source, card.file_obj, card)
             else:
-                self._error_placeholder.object += f"\\n⚠️ Skipped '{card.filename}.{card.extension}': unsupported format. Supported: {', '.join(SUPPORTED_DATA_EXTENSIONS)}."
+                self._error_placeholder.object += f"\\n⚠️ Skipped '{card.filename}.{card.extension}': unsupported format."
                 self._error_placeholder.visible = True
 
         for card in metadata_cards:

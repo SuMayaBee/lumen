@@ -17,7 +17,7 @@ from ...pipeline import Pipeline
 from ...sources.base import BaseSQLSource, Source
 from ...sources.duckdb import DuckDBSource
 from ...transforms.sql import SQLLimit
-from ..config import PROMPTS_DIR, SOURCE_TABLE_SEPARATOR, RetriesExceededError
+from ..config import PROMPTS_DIR, SOURCE_TABLE_SEPARATOR
 from ..context import ContextModel, TContext
 from ..editors import LumenEditor, SQLEditor
 from ..llm import Message
@@ -419,25 +419,16 @@ class SQLAgent(BaseLumenAgent):
                     raise e
 
                 # Retry with LLM fix
-                sql_error = e
                 step.stream(f"\n\n⚠️ SQL validation failed (attempt {i+1}/{max_retries}): {e}")
                 feedback = f"{type(e).__name__}: {e!s}"
                 if "KeyError" in feedback:
                     feedback += " The data does not exist; select from available data sources."
 
-                try:
-                    retry_result = await self.revise(
-                        feedback, messages, context, spec=sql_query, language=f"sql.{source.dialect}",
-                        discovery_context=discovery_context
-                    )
-                    sql_query = clean_sql(retry_result, source.dialect, prettify=True)
-                except RetriesExceededError:
-                    # LLM could not produce valid edit instructions (e.g.
-                    # Gemini returning bare integers instead of edit objects).
-                    # Re-raise the original SQL error so the user sees what
-                    # actually went wrong instead of a cryptic retry error.
-                    step.stream("\n\n❌ LLM could not produce a valid SQL fix")
-                    raise sql_error from None
+                retry_result = await self.revise(
+                    feedback, messages, context, spec=sql_query, language=f"sql.{source.dialect}",
+                    discovery_context=discovery_context
+                )
+                sql_query = clean_sql(retry_result, source.dialect, prettify=True)
         return sql_query
 
     async def _execute_query(

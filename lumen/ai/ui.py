@@ -1012,8 +1012,20 @@ class UI(Viewer):
                 views=[],
             )
 
-        self.interface.send(user_prompt, respond=True)
+        # Build message with new sources info
+        new_sources = [
+            source for source in self.context.get("sources", [])
+            if source not in old_sources
+        ]
+        source_names = [f"**{src.name}**: {', '.join(src.get_tables())}" for src in new_sources]
+        source_view = Markdown(
+            "Added sources:\n" + "\n".join(f"- {name}" for name in source_names),
+            sizing_mode="stretch_width"
+        ) if new_sources else None
+
         self._update_main_view()
+        msg = Column(user_prompt, source_view) if source_view else user_prompt
+        self.interface.send(msg, respond=True)
 
     def _on_sources_dialog_close(self, event):
         """Handle sources dialog close - restore pending query to input if user closed without adding files."""

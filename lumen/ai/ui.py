@@ -795,15 +795,12 @@ class UI(Viewer):
                 else:
                     main_content = self._splash
                 self._output[1:] = []
+            elif self._exploration_has_outputs(exploration):
+                main_content = self._split
+                self._output[1:] = [exploration]
             else:
-                tabs = exploration.view[0]
-                if len(tabs) == 0:
-                    # Chat-only exploration: no data views, stay on interface
-                    main_content = self.interface
-                    self._output[1:] = []
-                else:
-                    main_content = self._split
-                    self._output[1:] = [exploration]
+                main_content = self.interface
+                self._output[1:] = []
             self._current_mode = "Exploration"
             self._navigation_caption.object = EXPLORATION_CAPTION
 

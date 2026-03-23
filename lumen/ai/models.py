@@ -45,7 +45,7 @@ class ErrorDescription(BaseModel):
 
     explanation: str = Field(
         description="A brief description of the error suitable for a non-technical user.",
-        max_length=1000
+        max_length=300
     )
 class YesNo(BaseModel):
 
@@ -112,22 +112,6 @@ class RetrySpec(BaseModel):
             "The chart needs horizontal bars instead of vertical. Will swap x and y encodings."
         ])
     edits: list[LineEdit] = Field(description="A list of line edits based on the chain_of_thought.")
-
-    @model_validator(mode="before")
-    @classmethod
-    def coerce_malformed_edits(cls, values):
-        """Handle LLMs (e.g. Gemini) that return bare integers instead of edit objects."""
-        if isinstance(values, dict) and "edits" in values:
-            edits = values["edits"]
-            if isinstance(edits, list) and edits and any(isinstance(e, (int, float)) for e in edits):
-                raise ValueError(
-                    "Each edit must be an object, not a bare integer. "
-                    "Required format: {'op': 'insert'|'replace'|'delete', "
-                    "'line_no': <int>, 'line': '<content>'}. "
-                    "Example: [{'op': 'replace', 'line_no': 6, "
-                    "'line': 'SELECT avg(air) FROM air_temperature'}]"
-                )
-        return values
 
     @model_validator(mode="after")
     def validate_indices_nonconflicting(self) -> "RetrySpec":

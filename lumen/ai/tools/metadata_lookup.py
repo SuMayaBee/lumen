@@ -621,19 +621,6 @@ class MetadataLookup(VectorLookupTool):
         metaset = outputs.get("metaset")
         return str(metaset)
 
-    def _has_unsynced_sources(self, context: TContext) -> bool:
-        """Check if context contains sources not yet indexed in the vector store."""
-        sources = context.get("sources", [])
-        if not sources:
-            return False
-        vector_store_id = id(self.vector_store)
-        processed = self._sources_processed.get(vector_store_id, {})
-        in_progress = self._sources_in_progress.get(vector_store_id, set())
-        return any(
-            source.name not in processed and source.name not in in_progress
-            for source in sources
-        )
-
     async def respond(
         self,
         messages: list[Message],
@@ -644,15 +631,6 @@ class MetadataLookup(VectorLookupTool):
         Fetches tables based on the user query and returns formatted context.
         """
         await self._wait_for_pending_updates(timeout=30)
-
-        # On-demand sync: if context has sources that haven't been indexed
-        # yet (e.g. because coordinator.sync is still iterating other tools),
-        # index them now rather than returning an empty catalog.
-        if self._has_unsynced_sources(context):
-            if "tables_metadata" not in context:
-                context["tables_metadata"] = {}
-            await self._update_vector_store(context)
-
         out_model = await self._gather_info(messages, context)
         return [self._format_context(out_model)], out_model
 

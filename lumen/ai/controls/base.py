@@ -306,6 +306,12 @@ class BaseSourceControls(Viewer):
     _count = param.Integer(default=0, doc="Count of sources added")
 
     # UI customization
+    add_button_icon = param.String(default="add", doc="""
+        Material icon name for the add/upload confirmation button.""")
+
+    add_button_label = param.String(default="Confirm file(s)", doc="""
+        Text label for the add/upload confirmation button.""")
+
     label = param.String(default="", constant=True, doc="""
         HTML label shown in the sidebar for this control.""" )
 
@@ -347,8 +353,8 @@ class BaseSourceControls(Viewer):
         files_to_process = self._upload_cards.param["objects"].rx.len() > 0
         self._add_button = Button.from_param(
             self.param.add,
-            name="Confirm file(s)",
-            icon="add",
+            name=self.param.add_button_label,
+            icon=self.param.add_button_icon,
             visible=files_to_process,
             description="",
             align="center",
@@ -742,8 +748,17 @@ class BaseSourceControls(Viewer):
                     self.param.trigger("outputs")
             elif card.extension.endswith(TABLE_EXTENSIONS):
                 if source is None:
-                    source_id = f"{self.source_name_prefix}{self._count:06d}"
-                    source = DuckDBSource(uri=":memory:", ephemeral=True, name=source_id, tables={})
+                    # Reuse existing ephemeral DuckDB source to keep all
+                    # uploaded tables in one connection across chat uploads.
+                    existing_sources = self.outputs.get("sources", [])
+                    for existing in existing_sources:
+                        if isinstance(existing, DuckDBSource) and existing.ephemeral:
+                            source = existing
+                            break
+                    if source is None:
+                        source_id = f"{self.source_name_prefix}{self._count:06d}"
+                        source = DuckDBSource(uri=":memory:", ephemeral=True, name=source_id, tables={})
+                        self._count += 1
                 table_name = card.alias
                 filename = f"{card.filename}.{card.extension}"
                 if table_name not in source.metadata:

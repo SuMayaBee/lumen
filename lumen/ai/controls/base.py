@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import pathlib
+import tempfile
 import zipfile
 
 import pandas as pd
@@ -30,6 +31,7 @@ except ImportError:
 
 XARRAY_EXTENSIONS = ("nc", "zarr")
 TABLE_EXTENSIONS = ("csv", "parquet", "parq", "json", "xlsx", "geojson", "wkt", "zip")
+SUPPORTED_DATA_EXTENSIONS = TABLE_EXTENSIONS + XARRAY_EXTENSIONS
 
 METADATA_EXTENSIONS = ("md", "txt", "yaml", "yml", "json", "pdf", "docx", "doc", "pptx", "ppt")
 METADATA_FILENAME_PATTERNS = ("_metadata", "metadata_", "readme", "schema")
@@ -337,6 +339,7 @@ class BaseSourceControls(Viewer):
         super().__init__(**params)
         self._markitdown = None
         self._file_cards = []
+        self._xarray_temp_files: set[pathlib.Path] = set()
         self._init_ui_components()
         self._layout = self._render_layout()
 
@@ -592,8 +595,6 @@ class BaseSourceControls(Viewer):
         Because xarray-sql needs a real file path (not a bytes buffer),
         we write the upload to a temporary file first.
         """
-        import tempfile
-
         extension = card.extension
         table = card.alias
         filename = f"{card.filename}.{extension}"
@@ -610,6 +611,7 @@ class BaseSourceControls(Viewer):
             tmp.flush()
             tmp.close()
             tmp_path = tmp.name
+            self._xarray_temp_files.add(pathlib.Path(tmp_path))
 
             source_id = f"{self.source_name_prefix}{self._count:06d}_xarray"
             xarray_source = XArraySource(
@@ -624,6 +626,26 @@ class BaseSourceControls(Viewer):
             self._error_placeholder.object += f"\\n⚠️ Error loading {filename!r}: {e}"
             self._error_placeholder.visible = True
             return None
+
+    def _cleanup_xarray_temp_files(self):
+        """Delete any xarray upload temp files not in active use."""
+        active_files = set()
+        for source in self.outputs.get("sources", []):
+            if not hasattr(source, "source_type") or source.source_type != "xarray":
+                continue
+            tables = getattr(source, "tables", {})
+            if isinstance(tables, dict):
+                for table_source in tables.values():
+                    if isinstance(table_source, str):
+                        active_files.add(pathlib.Path(table_source))
+
+        stale_files = self._xarray_temp_files - active_files
+        for path in stale_files:
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                continue
+        self._xarray_temp_files -= stale_files
 
     def _read_json_file(self, file: io.BytesIO | io.StringIO, filename: str) -> pd.DataFrame:
         file.seek(0)
@@ -785,7 +807,7 @@ class BaseSourceControls(Viewer):
 
         for card in data_cards:
             log_debug(f"Processing data card: {card.filename}.{card.extension} (alias: {card.alias})")
-            if card.extension.endswith(custom_table_extensions):
+            if card.extension in custom_table_extensions:
                 source = table_upload_callbacks[card.extension](
                     self.context, card.file_obj, card.alias, card.filename
                 )
@@ -793,7 +815,7 @@ class BaseSourceControls(Viewer):
                     n_tables += len(source.get_tables())
                     self._register_source_output(source)
                     self.param.trigger("outputs")
-            elif card.extension.endswith(XARRAY_EXTENSIONS):
+            elif card.extension in XARRAY_EXTENSIONS:
                 if not XARRAY_AVAILABLE:
                     self._error_placeholder.object += (
                         f"\\n⚠️ Skipped '{card.filename}.{card.extension}': "
@@ -806,7 +828,7 @@ class BaseSourceControls(Viewer):
                     n_tables += len(xarray_source.get_tables())
                     self._register_source_output(xarray_source)
                     self.param.trigger("outputs")
-            elif card.extension.endswith(TABLE_EXTENSIONS):
+            elif card.extension in TABLE_EXTENSIONS:
                 if source is None:
                     # Reuse existing ephemeral DuckDB source to keep all
                     # uploaded tables in one connection across chat uploads.
@@ -826,12 +848,13 @@ class BaseSourceControls(Viewer):
                 source.metadata[table_name]["filename"] = filename
                 n_tables += self._add_table(source, card.file_obj, card)
             else:
-                self._error_placeholder.object += f"\\n⚠️ Skipped '{card.filename}.{card.extension}': unsupported format. Supported: {', '.join(TABLE_EXTENSIONS + XARRAY_EXTENSIONS)}."
+                self._error_placeholder.object += f"\\n⚠️ Skipped '{card.filename}.{card.extension}': unsupported format. Supported: {', '.join(SUPPORTED_DATA_EXTENSIONS)}."
                 self._error_placeholder.visible = True
 
         for card in metadata_cards:
             n_metadata += self._add_metadata_file(card)
 
+        self._cleanup_xarray_temp_files()
         log_debug(f"Processed files: {n_tables} tables, {n_metadata} metadata files")
         return n_tables, 0, n_metadata
 
@@ -840,6 +863,7 @@ class BaseSourceControls(Viewer):
         self._file_cards.clear()
         self._add_button.visible = False
         self._upload_cards.visible = False
+        self._cleanup_xarray_temp_files()
 
     def __panel__(self):
         return self._layout

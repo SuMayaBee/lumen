@@ -298,8 +298,6 @@ class MetadataLookup(VectorLookupTool):
 
             if self.include_metadata and self._raw_metadata.get(source.name) is None:
                 if isinstance(source, DuckDBSource) or (XArraySource is not None and isinstance(source, XArraySource)):
-                    # Fast in-process sources (DuckDB, XArray) — call synchronously
-                    # to avoid thread-safety issues.
                     self._raw_metadata[source.name] = source.get_metadata()
                 else:
                     metadata_task = asyncio.create_task(asyncio.to_thread(source.get_metadata))
@@ -397,14 +395,7 @@ class MetadataLookup(VectorLookupTool):
 
                 async def _gather_with_semaphore():
                     async with asyncio.Semaphore(self.max_concurrent):
-                        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-                        enriched = []
-                        for result in raw_results:
-                            if isinstance(result, BaseException):
-                                log_debug(f"[MetadataLookup] Task failed: {result}")
-                            elif isinstance(result, dict) and "text" in result:
-                                enriched.append(result)
-                        return enriched
+                        return [result for result in await asyncio.gather(*tasks, return_exceptions=True) if isinstance(result, dict) and "text" in result]
 
                 enriched_entries = await asyncio.wait_for(_gather_with_semaphore(), timeout=300)
             except TimeoutError:

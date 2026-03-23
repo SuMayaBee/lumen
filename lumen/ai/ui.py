@@ -898,19 +898,6 @@ class UI(Viewer):
                     if self._upload_controls.clear_uploads:
                         self._upload_controls._clear_uploads()
 
-                # Synchronously sync uploaded sources into self.context so the
-                # query that fires below already sees them.  _sync_sources is
-                # async (it awaits coordinator.sync / explorer.sync) so it may
-                # not have run yet by the time _execute_pending_query_with sends
-                # the message to the chat callback.
-                outputs = self._upload_controls.outputs
-                if "source" in outputs:
-                    src = outputs["source"]
-                    ctx_sources = self.context.setdefault("sources", [])
-                    if src not in ctx_sources:
-                        ctx_sources.append(src)
-                    self.context["source"] = src
-
                 # Clear the chat input
                 with edit_readonly(self._chat_input):
                     self._chat_input.param.update(
@@ -994,15 +981,6 @@ class UI(Viewer):
         self._sources_dialog_content.open = False
 
         if query:
-            # Ensure sources are synced to context before firing the query
-            # (_sync_sources is async and may not have executed yet).
-            outputs = self._upload_controls.outputs
-            if "source" in outputs:
-                src = outputs["source"]
-                ctx_sources = self.context.setdefault("sources", [])
-                if src not in ctx_sources:
-                    ctx_sources.append(src)
-                self.context["source"] = src
             self._execute_pending_query_with(query, sources_snapshot)
 
     def _show_upload_success(self, n_tables: int, n_metadata: int):

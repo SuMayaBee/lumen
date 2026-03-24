@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import pathlib
+import shutil
 import tempfile
 import zipfile
 
@@ -600,13 +601,13 @@ class BaseSourceControls(Viewer):
 
         try:
             card.file_obj.seek(0)
-            raw = card.file_obj.read()
 
             # Write to a named temp file with the correct extension so xarray
-            # can detect the backend (netcdf4 / zarr)
+            # can detect the backend (netcdf4 / zarr). Stream to avoid holding
+            # the full file in memory twice.
             suffix = f".{extension}"
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-            tmp.write(raw)
+            shutil.copyfileobj(card.file_obj, tmp)
             tmp.flush()
             tmp.close()
             tmp_path = tmp.name

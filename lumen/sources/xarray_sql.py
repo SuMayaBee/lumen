@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     pass
 
 try:
+    import cf_xarray  # noqa: F401
     import xarray as xr
 
     from xarray_sql import XarrayContext
@@ -307,75 +308,19 @@ class XArraySource(BaseSQLSource):
 
     # ---- CF convention awareness ----
 
-    # CF standard_name values that identify latitude coordinates
-    _CF_LATITUDE_NAMES = frozenset({
-        'latitude', 'grid_latitude', 'projection_y_coordinate',
-    })
-    # CF standard_name values that identify longitude coordinates
-    _CF_LONGITUDE_NAMES = frozenset({
-        'longitude', 'grid_longitude', 'projection_x_coordinate',
-    })
-    # CF standard_name values that identify time coordinates
-    _CF_TIME_NAMES = frozenset({
-        'time', 'forecast_reference_time', 'forecast_period',
-    })
-    # Common coordinate name patterns (fallback when CF attrs are absent)
-    _LATLON_NAME_PATTERNS = {
-        'latitude': re.compile(r'^(lat|latitude|y)$', re.IGNORECASE),
-        'longitude': re.compile(r'^(lon|lng|longitude|x)$', re.IGNORECASE),
-        'time': re.compile(r'^(time|t|date|datetime|forecast_time)$', re.IGNORECASE),
-    }
-    # CF unit patterns for coordinate detection
-    _CF_LAT_UNITS = re.compile(r'degrees?\s*_?(north|N)\b', re.IGNORECASE)
-    _CF_LON_UNITS = re.compile(r'degrees?\s*_?(east|E)\b', re.IGNORECASE)
+    @staticmethod
+    def _detect_cf_role(coord_name: str, coord: xr.DataArray) -> str | None:
+        """Detect the CF role of a coordinate using cf_xarray.
 
-    @classmethod
-    def _detect_cf_role(cls, coord_name: str, coord: xr.DataArray) -> str | None:
-        """Detect the CF role of a coordinate (latitude, longitude, time, or None).
-
-        Uses the CF conventions priority order:
-        1. ``standard_name`` attribute
-        2. ``axis`` attribute (X/Y/T)
-        3. ``units`` attribute pattern
-        4. Coordinate name heuristic
+        Falls back to datetime dtype check for coordinates with no CF attributes.
         """
-        attrs = coord.attrs
-
-        # 1. standard_name
-        std_name = attrs.get('standard_name', '').lower()
-        if std_name in cls._CF_LATITUDE_NAMES:
-            return 'latitude'
-        if std_name in cls._CF_LONGITUDE_NAMES:
-            return 'longitude'
-        if std_name in cls._CF_TIME_NAMES:
-            return 'time'
-
-        # 2. axis attribute
-        axis = attrs.get('axis', '').upper()
-        if axis == 'Y':
-            return 'latitude'
-        if axis == 'X':
-            return 'longitude'
-        if axis == 'T':
-            return 'time'
-
-        # 3. units
-        units = attrs.get('units', '')
-        if cls._CF_LAT_UNITS.search(units):
-            return 'latitude'
-        if cls._CF_LON_UNITS.search(units):
-            return 'longitude'
-
-        # 4. datetime dtype
+        ds = xr.Dataset(coords={coord_name: coord})
+        for role, names in ds.cf.coordinates.items():
+            if coord_name in names:
+                return role
+        # cf_xarray misses bare datetime64 coords with no CF attributes
         if np.issubdtype(coord.dtype, np.datetime64):
             return 'time'
-
-        # 5. name heuristic
-        name = str(coord_name).lower()
-        for role, pattern in cls._LATLON_NAME_PATTERNS.items():
-            if pattern.match(name):
-                return role
-
         return None
 
     @classmethod

@@ -25,7 +25,11 @@ def weather_ds():
     data = np.arange(5 * 3 * 2, dtype=float).reshape(5, 3, 2)
     return xr.Dataset(
         {"air": (("time", "lat", "lon"), data)},
-        coords={"time": times, "lat": lats, "lon": lons},
+        coords={
+            "time": times,
+            "lat": xr.DataArray(lats, dims=["lat"], attrs={"standard_name": "latitude", "units": "degrees_north"}),
+            "lon": xr.DataArray(lons, dims=["lon"], attrs={"standard_name": "longitude", "units": "degrees_east"}),
+        },
     )
 
 
@@ -236,7 +240,7 @@ def test_cf_role_time(weather_source):
 
 
 def test_cf_role_lat(weather_source):
-    """lat coordinate has a cf_role of latitude (detected by name)."""
+    """lat coordinate has a cf_role of latitude (detected via CF standard_name)."""
     schema = weather_source.get_schema("weather")
     assert schema["lat"].get("cf_role") == "latitude"
 

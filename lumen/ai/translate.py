@@ -9,7 +9,7 @@ from collections.abc import Callable
 from inspect import Signature, signature
 from types import FunctionType
 from typing import (
-    Any, Literal, TypeVar, Union, get_origin,
+    Any, Literal, TypeVar, Union, get_args, get_origin,
 )
 
 import param
@@ -616,3 +616,208 @@ def function_to_model(function: FunctionType, skipped: list[str] | None = None) 
 
     model = create_model(function.__name__, __doc__=description, **fields)  # type: ignore
     return model
+
+
+def parameter_to_annotation(parameter: param.Parameter) -> Any:
+    """Map a Param parameter instance to a best-effort Python annotation."""
+    annotation = PARAM_TYPE_MAPPING.get(type(parameter))
+    if annotation is not None:
+        pass
+    elif isinstance(parameter, param.List):
+        annotation = list
+    elif isinstance(parameter, param.Dict):
+        annotation = dict
+    elif isinstance(parameter, param.Tuple):
+        annotation = tuple
+    elif isinstance(parameter, param.Selector):
+        objects = list(getattr(parameter, "objects", []) or [])
+        annotation = type(objects[0]) if objects else str
+    else:
+        annotation = str
+
+    if parameter.allow_None:
+        return annotation | None
+    return annotation
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Function signature → param.Parameter (inverse of PARAM_TYPE_MAPPING)
+# ─────────────────────────────────────────────────────────────────────────────
+
+PYTHON_TYPE_TO_PARAM: dict[type, type[param.Parameter]] = {
+    str: param.String,
+    int: param.Integer,
+    float: param.Number,
+    bool: param.Boolean,
+    list: param.List,
+    dict: param.Dict,
+    datetime.date: param.CalendarDate,
+    datetime.datetime: param.Date,
+}
+
+
+def params_to_callable(
+    func: Callable,
+    params: dict[str, param.Parameter],
+    name: str | None = None,
+    doc: str | None = None,
+) -> Callable:
+    """
+    Dress a callable with signature, annotations, and docstring
+    derived from ``param.Parameter`` instances.
+
+    This is the inverse of :func:`signature_to_params`: given a set
+    of ``param.Parameter`` objects, it attaches an
+    ``inspect.Signature``, ``__annotations__``, and a docstring to
+    *func* so that :func:`function_to_model` (and therefore
+    ``FunctionTool``) can introspect it.
+
+    Parameters
+    ----------
+    func : Callable
+        The callable to decorate (modified in place and returned).
+    params : dict[str, param.Parameter]
+        Mapping of parameter name → ``param.Parameter`` instance.
+    name : str, optional
+        Override ``__name__`` and ``__qualname__``.
+    doc : str, optional
+        Base description. Parameter docs from *params* are appended
+        as a Google-style ``Args:`` block.
+
+    Returns
+    -------
+    Callable
+        The same *func*, now with ``__signature__``, ``__annotations__``,
+        ``__doc__`` (and optionally ``__name__``) set.
+    """
+    annotations: dict[str, Any] = {}
+    sig_params: list[inspect.Parameter] = []
+    doc_lines: list[str] = []
+
+    for param_name, parameter in params.items():
+        annotation = parameter_to_annotation(parameter)
+        annotations[param_name] = annotation
+        default = parameter.default
+        if default is None and not getattr(parameter, "allow_None", True):
+            default = inspect.Parameter.empty
+        sig_params.append(inspect.Parameter(
+            param_name,
+            inspect.Parameter.KEYWORD_ONLY,
+            default=default,
+            annotation=annotation,
+        ))
+        param_doc = (parameter.doc or "").strip()
+        if param_doc:
+            doc_lines.append(f"    {param_name}: {param_doc}")
+
+    if name is not None:
+        func.__name__ = name
+        func.__qualname__ = name
+    if doc is not None:
+        full_doc = doc
+        if doc_lines:
+            full_doc += "\n\nArgs:\n" + "\n".join(doc_lines)
+        func.__doc__ = full_doc
+    func.__signature__ = inspect.Signature(sig_params)
+    func.__annotations__ = annotations
+    return func
+
+
+def signature_to_params(
+    func: Callable,
+    skip: frozenset[str] = frozenset({"self", "cls", "return"}),
+) -> dict[str, param.Parameter]:
+    """
+    Convert a callable's type-annotated signature into ``param.Parameter``
+    instances suitable for constructing a dynamic ``Parameterized`` class.
+
+    Reuses :func:`doc_descriptions` for docstring-based parameter descriptions
+    and ``pydantic._internal._typing_extra.get_function_type_hints`` for
+    robust type-hint resolution — the same helpers that :func:`function_to_model`
+    uses for pydantic model generation.
+
+    Handles ``Literal[...]`` → ``param.Selector``, ``Optional[X]`` →
+    ``allow_None=True``, and standard Python types via
+    :data:`PYTHON_TYPE_TO_PARAM`.
+
+    Parameters
+    ----------
+    func : Callable
+        The function or bound method to introspect.
+    skip : frozenset[str]
+        Parameter names to skip (default: ``self``, ``cls``, ``return``).
+
+    Returns
+    -------
+    dict[str, param.Parameter]
+        Mapping of parameter name → ``param.Parameter`` instance.
+    """
+    sig = signature(func)
+    _, field_docs = doc_descriptions(func, sig)
+    type_hints = _typing_extra.get_function_type_hints(func)
+
+    params: dict[str, param.Parameter] = {}
+    for name, p in sig.parameters.items():
+        if name in skip or p.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+
+        annotation = type_hints.get(name, p.annotation)
+        if annotation is inspect.Parameter.empty:
+            annotation = str
+
+        has_default = p.default is not inspect.Parameter.empty
+        default = p.default if has_default else None
+        doc = field_docs.get(name, "")
+        origin = get_origin(annotation)
+
+        # Literal[...] → Selector
+        if origin is Literal:
+            args = get_args(annotation)
+            options = list(args)
+            params[name] = param.Selector(
+                default=default if default is not None else options[0],
+                objects=options,
+                doc=doc,
+            )
+            continue
+
+        # Union / Optional handling
+        allow_none = False
+        if origin is Union:
+            union_args = [a for a in get_args(annotation) if a is not type(None)]
+            has_none = len(union_args) < len(get_args(annotation))
+            if has_none:
+                allow_none = True
+            # Unwrap single-type Optional (e.g. Optional[int] → int)
+            if len(union_args) == 1:
+                annotation = union_args[0]
+            else:
+                # Multi-type Union (e.g. Union[str, int, datetime])
+                # Pick the first simple type we recognise, fallback to str
+                for candidate in union_args:
+                    if candidate in PYTHON_TYPE_TO_PARAM:
+                        annotation = candidate
+                        break
+                else:
+                    annotation = str
+
+        # Skip params whose annotation is not a simple type we can
+        # make a widget for (e.g. Dict[str, Any], RequestOptionBuilder)
+        param_cls = PYTHON_TYPE_TO_PARAM.get(annotation)
+        if param_cls is None:
+            continue
+
+        kwargs: dict[str, Any] = {"doc": doc}
+        if allow_none:
+            kwargs["allow_None"] = True
+            # Preserve None default for Optional params
+            if default is None and has_default:
+                kwargs["default"] = None
+        if default is not None:
+            kwargs["default"] = default
+        params[name] = param_cls(**kwargs)
+
+    return params

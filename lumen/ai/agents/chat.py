@@ -1,12 +1,17 @@
-from typing import Any
+from typing import Any, NotRequired
 
 import param
 
 from ..config import PROMPTS_DIR
-from ..context import TContext
+from ..context import ContextModel, TContext
 from ..llm import Message
 from ..schemas import get_metaset
 from .base import Agent
+
+
+class ChatOutputs(ContextModel):
+
+    chat: NotRequired[str]
 
 
 class ChatAgent(Agent):
@@ -21,7 +26,7 @@ class ChatAgent(Agent):
             "Use for general conversation that doesn't require fetching or querying data",
             "Use for technical questions about programming, functions, methods, libraries, or APIs",
             "Use when user asks to 'explain', 'interpret', 'analyze', 'summarize', or 'comment on' existing data in context",
-            "NOT when user asks to 'show', 'get', 'fetch', 'query', 'filter', 'calculate', 'aggregate', or 'transform' data",
+            "NOT when user asks to 'query', 'filter', 'calculate', 'aggregate', or 'transform' data",
             "NOT for creating new data transformations - only for explaining data that already exists",
         ]
     )
@@ -40,6 +45,8 @@ class ChatAgent(Agent):
         }
     )
 
+    output_schema = ChatOutputs
+
     async def respond(
         self,
         messages: list[Message],
@@ -56,4 +63,5 @@ class ChatAgent(Agent):
         if len(context.get("data", [])) == 0 and context.get("sql"):
             context["sql"] = f"{context['sql']}\n-- No data was returned from the query."
 
-        return [await self._stream(messages, context, **prompt_context)], {}
+        result = await self._stream(messages, context, **prompt_context)
+        return [result], {"chat": result.object}

@@ -4,33 +4,44 @@ import asyncio
 import re
 import traceback
 
+from collections.abc import Callable
 from functools import partial
 from textwrap import dedent, indent
 from types import FunctionType
-from typing import TYPE_CHECKING, Any, Self
+from typing import (
+    TYPE_CHECKING, Any, Self, get_type_hints,
+)
 
 import param
 
 from panel.chat import ChatFeed
 from panel.io.state import state
-from panel.pane import HTML
+from panel.layout.base import ListLike, NamedListLike
+from panel.pane import HTML, Image
 from panel.viewable import Viewer
 from panel.widgets import Tabulator
 from panel_material_ui import (
-    Card, ChatInterface, ChatStep, Column, Tabs, Typography,
+    Card, ChatInterface, ChatStep, Column, Typography,
 )
 
 from ..actor import Actor
-from ..agents import Agent, AnalysisAgent, ChatAgent
+from ..agents import (
+    Agent, AnalysisAgent, ChatAgent, SourceAgent,
+)
 from ..config import PROMPTS_DIR, MissingContextError
 from ..context import TContext
 from ..llm import LlamaCpp, Llm, Message
 from ..models import ThinkingYesNo
 from ..report import ActorTask, Section, TaskGroup
-from ..tools import MetadataLookup, Tool, VectorLookupToolUser
+from ..tools import (
+    MetadataLookup, SourceLookup, Tool, VectorLookupToolUser,
+)
+from ..tools.document_llm_tools import make_document_vector_llm_tools
+from ..tools.metaset_docs_llm_tools import make_load_metaset_relevant_docs_tool
 from ..utils import (
-    describe_data_sync, fuse_messages, get_root_exception, log_debug,
-    mutate_user_message, normalized_name, wrap_logfire,
+    content_to_text, describe_data_sync, fuse_messages, get_root_exception,
+    log_debug, mutate_user_message, normalized_name, set_content_text,
+    wrap_logfire,
 )
 from ..vector_store import NumpyVectorStore
 
@@ -83,15 +94,20 @@ class Plan(Section):
             todos_list.append(f"- {status} {instruction}")
         todos = "\n".join(todos_list)
 
-        formatted_content = (
-            f"User: {user_query['content']!r}\n"
-            f"Roadmap:\n{indent(todos, '    ')}\n"
-            f"Tasks marked ⚪ are scheduled for others later. "
-            f"Your EXCLUSIVE goal is to focus on the 🟡 task"
-        )
         rendered_history = []
         for msg in self.history:
             if msg is user_query:
+                user_content = user_query["content"]
+                if not isinstance(user_content, (str, list)):
+                    user_content = [user_content]
+                user_text = content_to_text(user_content)
+                roadmap_text = (
+                    f"User: {user_text!r}\n"
+                    f"Roadmap:\n{indent(todos, '    ')}\n"
+                    f"Tasks marked ⚪ are scheduled for others later. "
+                    f"Your EXCLUSIVE goal is to focus on the 🟡 task"
+                )
+                formatted_content = set_content_text(roadmap_text, user_content)
                 rendered_history.append({"content": formatted_content, "role": "user"})
             else:
                 rendered_history.append(msg)
@@ -131,7 +147,7 @@ class Plan(Section):
                 raise RuntimeError(f"{task.title!r} task failed to provide declared context.")
 
             context_keys = ", ".join(f"`{k}`" for k in task_context)
-            step.stream(f"Generated {len(outputs)} and provided {context_keys}.")
+            step.stream(f"\n\nGenerated {len(outputs)} outputs and provided {context_keys}.")
             step.success_title = f"Task {task.title!r} successfully completed"
             log_debug(f"\033[96mCompleted: {task.title}\033[0m", show_length=False)
         return outputs, task_context
@@ -239,6 +255,7 @@ class Plan(Section):
         context = context or self.context
         if "__error__" in context:
             del context["__error__"]
+        context["plan"] = self
         outputs, out_context = await super().execute(context, **kwargs)
         _, todos = self.render_task_history(failed=self.status == "error")
         if self.steps_layout is not None:
@@ -273,6 +290,13 @@ class Coordinator(Viewer, VectorLookupToolUser):
         default=3,
         doc="""
         Number of previous user-assistant interactions to include in the chat history.""",
+    )
+
+    llm_tools = param.List(
+        default=[make_load_metaset_relevant_docs_tool, make_document_vector_llm_tools],
+        doc="""
+        List of tools for the Planner to make available to the LLM. The tools are also
+        made available to the agents.""",
     )
 
     prompts = param.Dict(
@@ -316,6 +340,7 @@ class Coordinator(Viewer, VectorLookupToolUser):
         interface: ChatFeed | None = None,
         agents: list[Agent | type[Agent]] | None = None,
         tools: list[Tool | type[Tool]] | None = None,
+        llm_tools: list[Tool | type[Tool] | Callable[[TContext], list[Tool]]] | None = None,
         context: TContext | None = None,
         vector_store: VectorStore | None = None,
         document_vector_store: VectorStore | None = None,
@@ -323,6 +348,8 @@ class Coordinator(Viewer, VectorLookupToolUser):
     ):
         if context is None:
             context = {}
+        if llm_tools is None:
+            llm_tools = []
 
         if interface is None:
             interface = ChatInterface(
@@ -335,6 +362,10 @@ class Coordinator(Viewer, VectorLookupToolUser):
         # Use the same vector_store for documents if not explicitly provided
         if document_vector_store is None:
             document_vector_store = vector_store
+
+        # Expose vector stores on working memory so LLM tools (see document_llm_tools) can use them.
+        context["vector_store"] = vector_store
+        context["document_vector_store"] = document_vector_store
 
         llm = llm or self.llm
         instantiated = []
@@ -354,13 +385,19 @@ class Coordinator(Viewer, VectorLookupToolUser):
             # must use the same interface or else nothing shows
             if agent.llm is None:
                 agent.llm = llm
+
+            for tool in llm_tools:
+                if tool not in agent.llm_tools:
+                    agent.llm_tools.append(tool)
+
             instantiated.append(agent)
 
         params["tools"] = tools = self._process_tools(tools)
         params["prompts"] = self._process_prompts(params.get("prompts"), tools)
 
         super().__init__(
-            llm=llm, agents=instantiated, interface=interface, vector_store=vector_store, document_vector_store=document_vector_store, context=context, **params
+            llm=llm, agents=instantiated, interface=interface, vector_store=vector_store,
+            document_vector_store=document_vector_store, context=context, llm_tools=llm_tools, **params
         )
         for tools in self._tools.values():
             for tool in tools:
@@ -374,15 +411,38 @@ class Coordinator(Viewer, VectorLookupToolUser):
     def _process_tools(self, tools: list[type[Tool] | Tool] | None) -> list[type[Tool] | Tool | FunctionType]:
         tools = list(tools) if tools else []
 
+        def _schema_provides(tool, key: str) -> bool:
+            """Check if a tool's output_schema provides a given key,
+            using get_type_hints to handle inheritance correctly."""
+            schema = getattr(tool, 'output_schema', None)
+            if schema is None:
+                return False
+            try:
+                return key in get_type_hints(schema)
+            except Exception:
+                return key in getattr(schema, '__annotations__', {})
+
         # If none of the tools provide metaset, add MetadataLookup
         provides_metaset = any(
-            "metaset" in tool.output_schema.__annotations__ for tool in tools
+            _schema_provides(tool, "metaset") for tool in tools
             if isinstance(tool, Tool) or (isinstance(tool, type) and issubclass(tool, Tool))
         )
         if not provides_metaset:
             # Add both tools - they will share the same vector store through VectorLookupToolUser
             # Both need to be added as classes, not instances, for proper initialization
             tools += [MetadataLookup]
+
+        # If any agent is a SourceAgent and no tool provides source_actions, add SourceLookup
+        has_source_agent = any(
+            (isinstance(a, SourceAgent) if isinstance(a, Agent) else (isinstance(a, type) and issubclass(a, SourceAgent)))
+            for a in self.agents
+        )
+        provides_source_actions = any(
+            _schema_provides(tool, "source_actions") for tool in tools
+            if isinstance(tool, Tool) or (isinstance(tool, type) and issubclass(tool, Tool))
+        )
+        if has_source_agent and not provides_source_actions:
+            tools += [SourceLookup]
         return tools
 
     def _process_prompts(self, prompts: dict[str, dict[str, Any]], tools: list[type[Tool] | Tool]) -> dict[str, dict[str, Any]]:
@@ -433,17 +493,28 @@ class Coordinator(Viewer, VectorLookupToolUser):
         the actions to be taken by the agents.
         """
 
-    def _serialize(self, obj: Any, exclude_passwords: bool = True) -> str:
-        if isinstance(obj, (Column, Card, Tabs)):
-            string = ""
+    def _serialize(self, obj: Any, exclude_passwords: bool = True) -> str | list:
+        if isinstance(obj, str):
+            return obj
+
+        if isinstance(obj, (ListLike, NamedListLike)):
+            return self._serialize(list(obj), exclude_passwords=exclude_passwords)
+
+        if isinstance(obj, list):
+            contents = []
             for o in obj:
-                if isinstance(o, ChatStep) or o.name == "TableSourceCard":
+                if isinstance(o, ChatStep):
                     # Drop context from steps; should be irrelevant now
                     continue
-                string += self._serialize(o)
-            if exclude_passwords:
-                string = re.sub(r"password:.*\n", "", string)
-            return string
+                if isinstance(o, Image):
+                    contents.append(o)
+                    continue
+                result = self._serialize(o, exclude_passwords=exclude_passwords)
+                if isinstance(result, list):
+                    contents.extend(result)
+                else:
+                    contents.append(result)
+            return contents
 
         if isinstance(obj, HTML) and "catalog" in obj.tags:
             return f"Summarized table listing: {obj.object[:30]}"
@@ -459,7 +530,13 @@ class Coordinator(Viewer, VectorLookupToolUser):
             obj = obj.object
         elif hasattr(obj, "value"):
             obj = obj.value
-        return str(obj)
+
+        if exclude_passwords:
+            if isinstance(obj, str):
+                obj = re.sub(r"password:.*\n", "", obj)
+            elif isinstance(obj, list):
+                obj = [re.sub(r"password:.*\n", "", item) if isinstance(item, str) else item for item in obj]
+        return obj
 
     async def respond(self, messages: list[Message], context: TContext, **kwargs: dict[str, Any]) -> Plan | None:
         context = {"agent_tool_contexts": [], **context}
@@ -472,8 +549,6 @@ class Coordinator(Viewer, VectorLookupToolUser):
                     elif "model_path" in default_kwargs:
                         step.stream(f"Model: `{default_kwargs['model_path']}`")
                     await self.llm.get_client("default")  # caches the model for future use
-
-            # TODO INVESTIGATE
             messages = fuse_messages(self.interface.serialize(custom_serializer=self._serialize, limit=10) or messages, max_user_messages=self.history)
 
             # the master dict of agents / tools to be used downstream

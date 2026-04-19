@@ -1,4 +1,5 @@
 import datetime
+import inspect
 
 from abc import abstractmethod
 from contextlib import nullcontext
@@ -21,6 +22,57 @@ from .utils import (
 )
 
 
+def _expand_llm_tool_entries(entries: list[Any] | None, context: TContext) -> list[Any]:
+    """
+    Expand :attr:`LLMUser.llm_tools` entries: keep plain tools; resolve callables
+    ``f(context)`` or no-arg ``f()`` to a tool or list of tools.
+    """
+    from .tools.base import FunctionTool
+
+    if not entries:
+        return []
+    out: list[Any] = []
+    for item in entries:
+        if item is None:
+            continue
+        if isinstance(item, (list, tuple)):
+            out.extend(_expand_llm_tool_entries(list(item), context))
+            continue
+        if isinstance(item, FunctionTool):
+            out.append(item)
+            continue
+        if inspect.isclass(item):
+            out.append(item)
+            continue
+        if callable(item):
+            sig = inspect.signature(item)
+            produced = item(context) if len(sig.parameters) else item()
+            if inspect.isawaitable(produced):
+                raise TypeError(
+                    "llm_tools callables must be synchronous; async factories are not supported."
+                )
+            if produced is None:
+                continue
+            if isinstance(produced, (list, tuple)):
+                out.extend(produced)
+            else:
+                out.append(produced)
+            continue
+        out.append(item)
+    return out
+
+
+def _merge_prompt_tools(
+    registration: list[Any] | None,
+    explicit: list[Any] | None,
+    context: TContext,
+) -> list[Any] | None:
+    merged = _expand_llm_tool_entries(registration, context)
+    if explicit:
+        merged = merged + list(explicit)
+    return merged if merged else None
+
+
 class NullStep:
 
     def __init__(self):
@@ -38,6 +90,11 @@ class LLMUser(param.Parameterized):
 
     llm = param.ClassSelector(class_=Llm, doc="""
         The LLM implementation to query.""")
+
+    llm_tools = param.List(default=[], doc="""
+        Extra LLM tools for every ``_invoke_prompt`` / ``_stream_prompt`` on this actor.
+        Entries may be tool instances or callables: ``f(context)`` or no-arg ``f()`` returning
+        a single tool or a list of tools.""")
 
     prompts = param.Dict(default={
         "main": {"template": PROMPTS_DIR / "Actor" / "main.jinja2"},
@@ -167,6 +224,16 @@ class LLMUser(param.Parameterized):
         prompt_context = dict(kwargs)
         prompt_context["memory"] = context
         prompt_context["current_datetime"] = datetime.datetime.now()
+        if self.interface:
+            msgs = self.interface.serialize(
+                filter_by=lambda msgs: [msg for msg in msgs if isinstance(msg.object, str)]
+            )
+            history = []
+            for msg in reversed(msgs):
+                if msg["role"].lower() == "user":
+                    break
+                history.append(f"{msg['role']}: {msg['content']}")
+            prompt_context["chat_history"] = "\n".join(reversed(history))
         return prompt_context
 
     async def _render_prompt(self, prompt_name: str, messages: list[Message], context: TContext, **kwargs) -> str:
@@ -210,6 +277,7 @@ class LLMUser(param.Parameterized):
         model_spec: str | None = None,
         model_index: int | None = None,
         model_kwargs: dict | None = None,
+        tools: list | None = None,
         **prompt_kwargs
     ) -> Any:
         """
@@ -231,6 +299,8 @@ class LLMUser(param.Parameterized):
             Additional context variables for determining the model_spec or response_model
         model_index : int, optional
             The index of the model to subset if the model spec returns a list of models
+        tools : list, optional
+            Per-call tools forwarded to ``llm.invoke``, after :attr:`llm_tools` are expanded.
         **kwargs : dict
             Additional context variables for the prompt template
 
@@ -254,11 +324,17 @@ class LLMUser(param.Parameterized):
         if model_index is not None:
             model_spec = model_spec[model_index]
 
+        invoke_kw: dict = {}
+        merged_tools = _merge_prompt_tools(self.llm_tools, tools, context)
+        if merged_tools is not None:
+            invoke_kw["tools"] = merged_tools
+
         result = await self.llm.invoke(
             messages=messages,
             system=system,
             response_model=response_model,
             model_spec=model_spec,
+            **invoke_kw,
         )
         return result
 
@@ -272,6 +348,7 @@ class LLMUser(param.Parameterized):
         model_kwargs: dict | None = None,
         model_index: int | None = None,
         field: str | None = None,
+        tools: list | None = None,
         **kwargs
     ):
         """
@@ -295,6 +372,8 @@ class LLMUser(param.Parameterized):
             The index of the model to subset if the model spec returns a list of models
         field : str, optional
             Specific field to extract from the response model
+        tools : list, optional
+            Per-call tools forwarded to ``llm.stream``, after :attr:`llm_tools` are expanded.
         **kwargs : dict
             Additional context variables for the prompt template
 
@@ -322,13 +401,16 @@ class LLMUser(param.Parameterized):
         if model_index is not None:
             model_spec = model_spec[model_index]
 
+        stream_merged = _merge_prompt_tools(self.llm_tools, tools, context)
+
         # Stream from the LLM
         async for chunk in self.llm.stream(
             messages=messages,
             system=system,
             response_model=response_model,
             model_spec=model_spec,
-            field=field
+            field=field,
+            tools=stream_merged,
         ):
             yield chunk
 

@@ -7,6 +7,7 @@ from .deck_gl import DeckGLAgent
 from .document_list import DocumentListAgent
 from .document_summarizer import DocumentSummarizerAgent
 from .hvplot import hvPlotAgent
+from .source import SourceAgent
 from .sql import SQLAgent
 from .table_list import TableListAgent
 from .validation import ValidationAgent
@@ -21,9 +22,10 @@ __all__ = [
     "DeckGLAgent",
     "DocumentListAgent",
     "DocumentSummarizerAgent",
-    "hvPlotAgent",
     "SQLAgent",
+    "SourceAgent",
     "TableListAgent",
     "ValidationAgent",
     "VegaLiteAgent",
+    "hvPlotAgent",
 ]

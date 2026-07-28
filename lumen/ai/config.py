@@ -19,7 +19,8 @@ ChatMessage.default_avatars.update({
     "Runner": {"type": "icon", "icon": "playlist_play"},
     "SQL": {"type": "icon", "icon": "storage"},
     "Source": {"type": "icon", "icon": "cloud_download"},
-    "DBT": {"type": "icon", "icon": "analytics"}
+    "DBT": {"type": "icon", "icon": "analytics"},
+    "Clarification": {"type": "icon", "icon": "live_help"}
 })
 
 FORMAT_ICONS = {
@@ -79,8 +80,6 @@ class MissingContextError(Exception):
 
 THIS_DIR = Path(__file__).parent
 PROMPTS_DIR = THIS_DIR / "prompts"
-STYLESHEETS_DIR = THIS_DIR / "stylesheets"
-SPLITJS_STYLESHEETS = [(STYLESHEETS_DIR / "splitjs.css").read_text()]
 
 GETTING_STARTED_SUGGESTIONS = [
     ("search", "What data is available?"),

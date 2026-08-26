@@ -1,3 +1,4 @@
+import json
 import os
 
 from abc import abstractmethod
@@ -19,6 +20,7 @@ PROVIDER_ENV_VARS = {
     "groq": "GROQ_API_KEY",
     "ai-catalyst": "AI_CATALYST_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "kilo": "KILO_API_KEY",
 }
 
 
@@ -91,7 +93,7 @@ class DbtslMixin(ServiceMixin):
         """
         Create and return a dbt Semantic Layer client instance.
         """
-        from dbtsl.asyncio import AsyncSemanticLayerClient
+        from dbtsl.asyncio import AsyncSemanticLayerClient  # noqa: PLC0415
 
         kwargs = self._instantiate_client_kwargs(**extra_kwargs)
         return AsyncSemanticLayerClient(**kwargs)
@@ -130,7 +132,7 @@ class LlamaCppMixin(ServiceMixin):
         if 'model_path' in kwargs:
             return kwargs['model_path']
         elif 'repo_id' in kwargs and 'filename' in kwargs:
-            from huggingface_hub import hf_hub_download
+            from huggingface_hub import hf_hub_download  # noqa: PLC0415
             return hf_hub_download(
                 repo_id=kwargs['repo_id'],
                 filename=kwargs['filename'],
@@ -175,7 +177,7 @@ class LlamaCppMixin(ServiceMixin):
         """
         Create and return a Llama instance with the configured parameters.
         """
-        from llama_cpp import Llama
+        from llama_cpp import Llama  # noqa: PLC0415
 
         kwargs = self._instantiate_client_kwargs(model_kwargs=model_kwargs, **extra_kwargs)
         return Llama(**kwargs)
@@ -216,9 +218,7 @@ class LlamaCppMixin(ServiceMixin):
         if not huggingface_models:
             return
 
-        import json
-
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import hf_hub_download  # noqa: PLC0415
         print(f"{cls.__name__} provider is downloading following models:\n\n{json.dumps(huggingface_models, indent=2)}")  # noqa: T201
         for kwargs in model_kwargs_dict.values():
             repo_id = kwargs.get('repo_id')
@@ -242,7 +242,14 @@ class APIKeyServiceMixin(ServiceMixin):
 
     def __init__(self, **params):
         if "api_key" not in params:
-            params["api_key"] = os.environ.get(self.api_key_env_var)
+            # Only override when the variable is actually set. os.environ.get
+            # returns None otherwise, which overwrote subclass defaults: Ollama
+            # declares api_key="ollama" and does not accept None, so it could
+            # not be constructed at all unless OPENAI_API_KEY happened to be
+            # set, despite needing no key of its own.
+            api_key = os.environ.get(self.api_key_env_var)
+            if api_key:
+                params["api_key"] = api_key
         super().__init__(**params)
 
     def _instantiate_client_kwargs(self, **extra_kwargs) -> dict:
@@ -262,7 +269,7 @@ class AnthropicMixin(APIKeyServiceMixin):
     api_key_env_var: str = PROVIDER_ENV_VARS['anthropic']
 
     def _instantiate_client(self, async_client=True, **extra_kwargs):
-        from anthropic import Anthropic, AsyncAnthropic
+        from anthropic import Anthropic, AsyncAnthropic  # noqa: PLC0415
         kwargs = self._instantiate_client_kwargs(**extra_kwargs)
         return AsyncAnthropic(**kwargs) if async_client else Anthropic(**kwargs)
 
@@ -276,7 +283,7 @@ class GenAIMixin(APIKeyServiceMixin):
     api_key_env_var: str = PROVIDER_ENV_VARS['google']
 
     def _instantiate_client(self, **extra_kwargs):
-        from google import genai
+        from google import genai  # noqa: PLC0415
         kwargs = self._instantiate_client_kwargs(**extra_kwargs)
         return genai.Client(**kwargs)
 
@@ -290,7 +297,7 @@ class MistralAIMixin(APIKeyServiceMixin):
     api_key_env_var: str = PROVIDER_ENV_VARS['mistral']
 
     def _instantiate_client(self, **extra_kwargs):
-        from mistralai import Mistral
+        from mistralai import Mistral  # noqa: PLC0415
         kwargs = self._instantiate_client_kwargs(**extra_kwargs)
         return Mistral(**kwargs)
 
@@ -315,7 +322,7 @@ class AzureMistralAIMixin(MistralAIMixin):
         """
         Create and return an Azure Mistral client instance.
         """
-        from mistralai_azure import MistralAzure
+        from mistralai_azure import MistralAzure  # noqa: PLC0415
         kwargs = self._instantiate_client_kwargs(**extra_kwargs)
         return MistralAzure(azure_endpoint=self.endpoint, **kwargs)
 

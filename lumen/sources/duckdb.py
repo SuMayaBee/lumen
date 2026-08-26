@@ -14,6 +14,7 @@ import param
 import sqlglot
 
 from ..config import config
+from ..pipeline import Pipeline
 from ..serializers import Serializer
 from ..transforms import Filter
 from ..transforms.sql import (
@@ -24,6 +25,9 @@ from .base import BaseSQLSource, Source, cached
 
 if TYPE_CHECKING:
     import pandas as pd
+
+# DuckDB reports a geometry column carrying a CRS as GEOMETRY('EPSG:4326')
+GEOMETRY_CRS = re.compile(r"GEOMETRY\('(.+)'\)")
 
 
 class DuckDBSource(BaseSQLSource):
@@ -68,8 +72,9 @@ class DuckDBSource(BaseSQLSource):
 
     geometry_crs = param.String(default=None, allow_None=True, doc="""
         CRS to reapply to geometry columns after the WKB roundtrip through
-        DuckDB, which stores geometry without a CRS. Populated from the source
-        data at ingest; may also be set explicitly for a known dataset.""")
+        DuckDB, used as a fallback when the column type carries no CRS of its
+        own. Populated from the source data at ingest; may also be set
+        explicitly for a known dataset.""")
 
     read_only = param.Boolean(default=None, doc="""
         Whether to open the DuckDB database in read-only mode.""")
@@ -108,7 +113,12 @@ class DuckDBSource(BaseSQLSource):
             # First pass: separate file paths from SQL expressions
             for table_name, table_expr in self.tables.items():
                 if isinstance(table_expr, str) and self._is_file_path(table_expr):
-                    table_name = re.sub(r'\W+', '_', table_name)
+                    # Must match normalize_table, which every lookup goes
+                    # through. Substituting non-word characters alone left the
+                    # leading underscore an absolute path produces, so the
+                    # registered key did not survive its own normalization and
+                    # the source could not find its own table.
+                    table_name = normalize_table_name(table_name)
                     self._file_based_tables[table_name] = table_expr
                 else:
                     sql_based_tables[table_name] = table_expr
@@ -302,7 +312,6 @@ class DuckDBSource(BaseSQLSource):
         if 'mirrors' not in spec:
             return spec
 
-        from ..pipeline import Pipeline
         mirrors = {}
         for table, mirror in spec['mirrors'].items():
             if isinstance(mirror, pd.DataFrame):
@@ -382,7 +391,6 @@ class DuckDBSource(BaseSQLSource):
                 source = cls.from_spec(src_spec)
                 resolved_mirrors[table] = (source, src_table)
             elif mirror.get('type') == 'pipeline':
-                from ..pipeline import Pipeline
                 resolved_mirrors[table] = Pipeline.from_spec(mirror)
             else:
                 resolved_mirrors[table] = Serializer.deserialize(mirror)
@@ -516,7 +524,11 @@ class DuckDBSource(BaseSQLSource):
         a GeoDataFrame when geopandas is available (WKB bytes otherwise).
         """
         rel = cursor.execute(sql_expr, params) if params else cursor.execute(sql_expr)
-        geom_cols = [d[0] for d in rel.description if str(d[1]) == 'GEOMETRY']
+        geom_crs = {
+            d[0]: (m.group(1) if (m := GEOMETRY_CRS.search(str(d[1]))) else self.geometry_crs)
+            for d in rel.description if str(d[1]).startswith('GEOMETRY')
+        }
+        geom_cols = list(geom_crs)
         if not geom_cols:
             return rel.fetch_df(date_as_object=date_as_object)
 
@@ -531,7 +543,7 @@ class DuckDBSource(BaseSQLSource):
         if gpd := try_import("geopandas"):
             for col in geom_cols:
                 df[col] = gpd.GeoSeries.from_wkb(
-                    df[col].apply(bytes), crs=self.geometry_crs
+                    df[col].apply(bytes), crs=geom_crs[col]
                 )
             df = gpd.GeoDataFrame(df, geometry=geom_cols[0])
         return df

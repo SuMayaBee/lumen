@@ -11,6 +11,7 @@ from io import BytesIO, StringIO
 from typing import TYPE_CHECKING, Any
 
 import param
+import vl_convert as vlc
 
 from panel.config import config
 from panel.layout import Column, Row
@@ -38,7 +39,7 @@ from .config import FORMAT_ICONS, FORMAT_LABELS
 from .controls import (
     AnnotationControls, CopyControls, ExplainControls, RetryControls,
 )
-from .utils import describe_data, get_data
+from .utils import describe_data, get_frame
 
 if TYPE_CHECKING:
     from panel.chat.feed import ChatFeed
@@ -225,8 +226,7 @@ class LumenEditor(Viewer):
         else:
             sql_limit = None
         if sql_limit:
-            data = pipeline.data
-            limited = len(data) == sql_limit.limit
+            limited = len(pipeline.data) == sql_limit.limit
             if limited:
                 def unlimit(e):
                     sql_limit.limit = None if e.new else 1_000_000
@@ -243,7 +243,7 @@ class LumenEditor(Viewer):
             # If output is a view we provide the full View specification
             return {"view": self._spec_dict}
         elif isinstance(view, Pipeline):
-            data = await get_data(view)
+            data = await get_frame(view)
             return {
                 "pipeline": view,
                 "table": view.table,
@@ -352,18 +352,59 @@ class VegaLiteEditor(LumenEditor):
             spec_dict.pop('pipeline')
         return type(component).from_spec(spec_dict, pipeline=pipeline)
 
+    @staticmethod
+    def _supplies_geometry(data: dict) -> bool:
+        """Whether a data definition yields features a geoshape can draw."""
+        fmt = data.get("format") or {}
+        return fmt.get("type") in ("topojson", "geojson") or fmt.get("property") == "features"
+
+    @classmethod
+    def _check_geoshape_data(cls, node: Any, inherited: dict | None = None) -> None:
+        """Raise if any geoshape mark resolves to data that carries no geometry.
+
+        Such a spec compiles cleanly and then draws nothing at all, so the only
+        symptom is an empty canvas; raising turns that silence into an error the
+        agent can retry against. Layers inherit their parent's ``data`` when they
+        declare none, so the check follows the same scoping rather than looking
+        only at the top level. A spec with no ``data`` anywhere is the valid case
+        where the table's own geometry is injected at render time.
+        """
+        if isinstance(node, list):
+            for item in node:
+                cls._check_geoshape_data(item, inherited)
+            return
+        if not isinstance(node, dict):
+            return
+
+        data = node.get("data", inherited)
+        mark = node.get("mark")
+        mark_type = mark.get("type") if isinstance(mark, dict) else mark
+        if mark_type == "geoshape" and isinstance(data, dict) and not cls._supplies_geometry(data):
+            raise RuntimeError(
+                "A geoshape mark draws the geometry found in `data`, but `data` here is the "
+                "table, which carries no geometry, so the map renders empty. Either set `data` "
+                "to the boundary topojson/geojson and pull the table's columns in with a "
+                "`transform.lookup` whose `from.data` names the table, or omit `data` entirely "
+                "when the table has its own geometry column."
+            )
+
+        for key, value in node.items():
+            if key != "data":
+                cls._check_geoshape_data(value, data)
+
     @classmethod
     def validate_spec(cls, spec):
         if "spec" in spec:
             spec = spec["spec"]
         try:
-            import vl_convert as vlc
             vlc.vegalite_to_vega(spec)
         except ValueError as e:
             msg = str(e)
             if '\n    at Nc.' in msg:
                 msg = msg[:msg.index('\n    at Nc.')]
             raise RuntimeError(msg) from e
+
+        cls._check_geoshape_data(spec)
         return super().validate_spec(spec)
 
     def __str__(self):

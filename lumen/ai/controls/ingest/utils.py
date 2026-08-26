@@ -309,7 +309,7 @@ def read_geo_file(
             raise ValueError("ZIP file does not contain a shapefile (.shp)")
         file_obj.seek(0)
 
-    import geopandas as gpd
+    import geopandas as gpd  # noqa: PLC0415
 
     geo_df = gpd.read_file(file_obj)
     if geo_df.empty:
@@ -319,8 +319,10 @@ def read_geo_file(
     df["geometry"] = geo_df["geometry"].to_wkb()
 
     cols = ", ".join(f'"{c}"' for c in df.columns if c != "geometry")
+    # A TEMP table is scoped to the creating connection, so it would be
+    # invisible to the cursors DuckDBSource opens when querying.
     conversion = (
-        f"CREATE TEMP TABLE {alias} AS SELECT {cols}, "
+        f"CREATE TABLE {alias} AS SELECT {cols}, "
         f"ST_GeomFromWKB(geometry) as geometry FROM {alias}_temp"
     )
 

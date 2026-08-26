@@ -46,13 +46,17 @@ from ..pipeline import Pipeline
 from ..sources.base import Source
 from ..sources.xarray_sql import XArraySQLSource
 from ..transforms import SQLRemoveSourceSeparator
-from ..util import log, try_import_xarray
+from ..util import (
+    as_narwhals, as_pandas, is_lazyframe, is_narwhals, log, try_import,
+    try_import_xarray,
+)
 from .config import (
     PROMPTS_DIR, SOURCE_TABLE_SEPARATOR, UNRECOVERABLE_ERRORS, VEGA_MAP_LAYER,
     VEGA_ZOOMABLE_MAP_ITEMS, MissingContextError, RetriesExceededError,
 )
 
 if TYPE_CHECKING:
+    from narwhals.stable.v2.typing import Frame, IntoFrame
     from panel.chat.step import ChatStep
 
     from .editors import VegaLiteEditor
@@ -71,6 +75,11 @@ IMAGE_MIME_TYPES = {
     '.bmp': 'image/bmp',
 }
 
+# Rows beyond which a frame is sampled before being profiled. Shared by
+# describe_data_sync and lint_data so the summary an LLM reads and the findings
+# it is asked to act on are drawn from the same amount of data.
+PROFILE_SAMPLE_ROWS = 5000
+
 # Column-selection tuning for describe_data_sync.
 DEFAULT_MAX_SUMMARY_COLS = 16
 # Columns with at most this many distinct values are treated as
@@ -81,6 +90,18 @@ LOW_CARDINALITY_MAX = 10
 # separator so all common series conventions are caught: "X_pca_12", "PC1",
 # "dim-1", "emb.2". Used to collapse machine-generated numbered column series.
 INDEXED_COLUMN_RE = re.compile(r"^(?P<stem>.+?)[_.\-]?(?P<idx>\d+)$")
+
+# Tokenizer used to size prompt payloads. o200k_base is what semchunk resolves
+# vector_store's "gpt-4o-mini" default to, so chunking and truncation agree.
+TOKEN_ENCODING = "o200k_base"
+# Used when the tokenizer cannot be loaded. Deliberately below the ~4 chars/token
+# of English prose: dense YAML and aligned numeric tables run nearer 2.5, and
+# under-estimating the ratio over-estimates tokens, so we truncate early rather
+# than blowing a budget.
+FALLBACK_CHARS_PER_TOKEN = 3.0
+# Resolved lazily by _get_token_encoder. Key presence (not its value)
+# distinguishes "not yet resolved" from "resolved, and unavailable".
+_TOKEN_ENCODER_CACHE: dict[str, Any] = {}
 
 
 def deterministic_hash(text: str) -> int:
@@ -605,14 +626,27 @@ async def get_pipeline(**kwargs):
     return await asyncio.to_thread(get_pipeline_sync)
 
 
+async def get_frame(pipeline):
+    """
+    Return pipeline.data off the main thread, in whichever dataframe
+    library the source produced it.
+
+    For consumers that accept any of them; everything written against pandas
+    calls get_data instead.
+    """
+    def get_frame_sync():
+        return pipeline.data
+    return await asyncio.to_thread(get_frame_sync)
+
+
 async def get_data(pipeline):
     """
-    A wrapper be able to use asyncio.to_thread and not
-    block the main thread when calling pipeline.data
+    Return pipeline.data as pandas, off the main thread.
+
+    result_to_dataframe, the LLM code sandbox and the plotting agents are
+    all written against pandas.
     """
-    def get_data_sync():
-        return pipeline.data
-    return await asyncio.to_thread(get_data_sync)
+    return as_pandas(await get_frame(pipeline))
 
 
 def _score_column_relevance(series: pd.Series, n_rows: int) -> float:
@@ -721,8 +755,56 @@ def _select_relevant_columns(
     return selected, len(selected) < len(columns)
 
 
+def _sample_for_summary(df: IntoFrame | Frame) -> tuple[pd.DataFrame, tuple[int, int], bool]:
+    """
+    Return df as pandas, row-sampled for profiling, along with its true shape.
+
+    Sampling before the pandas conversion is the point of this function. The
+    summary reads PROFILE_SAMPLE_ROWS rows at most, and converting first pays
+    for the whole frame to get them: on a 2M x 15 polars frame the conversion
+    alone costs 0.38s and allocates ~700MB.
+
+    The shape returned is the frame's own rather than the sample's, so the
+    summary still reports the real row count.
+
+    Parameters
+    ----------
+    df : IntoFrame | Frame
+        The frame to profile, in pandas, dask or any library narwhals
+        supports.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, tuple[int, int], bool]
+        The (possibly sampled) pandas frame, the original frame's shape, and
+        whether the frame was sampled.
+    """
+    dd = try_import('dask.dataframe', load=False)
+    if dd is not None and isinstance(df, dd.DataFrame):
+        # A dask frame reports its shape as a Delayed, which none of the
+        # branches below can act on. Sampling partitions would have to compute
+        # the row count anyway, so compute the frame and profile the result.
+        df = df.compute()
+
+    narwhals_df = df if isinstance(df, pd.DataFrame) else as_narwhals(df)
+    if is_lazyframe(narwhals_df):
+        # Collect in the frame's own library rather than through pandas; the
+        # sample below is what keeps the conversion small.
+        narwhals_df = narwhals_df.collect()
+    if is_narwhals(narwhals_df):
+        shape = narwhals_df.shape
+        if shape[0] <= PROFILE_SAMPLE_ROWS:
+            return narwhals_df.to_pandas(), shape, False
+        return narwhals_df.sample(n=PROFILE_SAMPLE_ROWS).to_pandas(), shape, True
+
+    shape = df.shape
+    if shape[0] <= PROFILE_SAMPLE_ROWS:
+        return df, shape, False
+    return df.sample(PROFILE_SAMPLE_ROWS), shape, True
+
+
 def describe_data_sync(
-    df: pd.DataFrame,
+    df: IntoFrame | Frame,
     enum_limit: int = 3,
     reduce_enums: bool = True,
     row_limit: int | None = None,
@@ -734,8 +816,8 @@ def describe_data_sync(
 
     Parameters
     ----------
-    df : pd.DataFrame
-        The DataFrame to describe
+    df : IntoFrame | Frame
+        The DataFrame to describe, in pandas or any library narwhals supports
     enum_limit : int
         Maximum number of enum values to show per column
     reduce_enums : bool
@@ -759,8 +841,8 @@ def describe_data_sync(
     str
         YAML-formatted summary of the DataFrame
     """
-    size = df.size
-    shape = df.shape
+    df, shape, is_sampled = _sample_for_summary(df)
+    size = shape[0] * shape[1]
     shape_header = {"data_shape": [int(shape[0]), int(shape[1])], "is_sampled": False}
     if shape[0] == 1 or size < 10 or (shape[1] > 8 and size < 100):
         records = df.to_dict(orient='records')
@@ -769,11 +851,6 @@ def describe_data_sync(
     if size < 100:
         header = yaml.dump(shape_header, default_flow_style=False, allow_unicode=True, sort_keys=False)
         return header + df.to_markdown(index=False)
-
-    is_sampled = False
-    if shape[0] > 5000:
-        is_sampled = True
-        df = df.sample(5000)
 
     df = df.sort_index()
 
@@ -849,11 +926,12 @@ def describe_data_sync(
         if nulls > 0:
             df_describe_dict[col]["nulls"] = nulls
 
-    # select datetime64 columns
-    for col in df.select_dtypes(include=["datetime64"]).columns:
-        for key in df_describe_dict[col]:
-            df_describe_dict[col][key] = str(df_describe_dict[col][key])
-        df[col] = df[col].astype(str)  # shorten output
+    # select datetime64 columns (including tz-aware)
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            for key in df_describe_dict[col]:
+                df_describe_dict[col][key] = str(df_describe_dict[col][key])
+            df[col] = df[col].astype(str)  # shorten output
 
     # select all numeric columns and round
     for col in df.select_dtypes(include=["int64", "float64"]).columns:
@@ -917,7 +995,7 @@ def describe_data_sync(
 
 
 async def describe_data(
-    df: pd.DataFrame,
+    df: IntoFrame | Frame,
     enum_limit: int = 3,
     reduce_enums: bool = True,
     row_limit: int | None = None,
@@ -929,8 +1007,8 @@ async def describe_data(
 
     Parameters
     ----------
-    df : pd.DataFrame
-        The DataFrame to describe
+    df : IntoFrame | Frame
+        The DataFrame to describe, in pandas or any library narwhals supports
     enum_limit : int
         Maximum number of enum values to show per column
     reduce_enums : bool
@@ -954,7 +1032,6 @@ async def describe_data(
         describe_data_sync, df, enum_limit, reduce_enums, row_limit,
         max_cols, priority_columns,
     )
-
 
 
 def clean_sql(sql_expr: str, dialect: str | None = None, prettify: bool = False) -> str:
@@ -1100,7 +1177,8 @@ def log_debug(msg: Any, offset: int = 24, prefix: str = "", suffix: str = "", sh
     else:
         log.debug(msg)
     if show_length:
-        log.debug(f"Characters: \033[94m{len(msg)}\033[0m")
+        num_tokens = count_tokens(msg) if isinstance(msg, str) else sum(count_tokens(m) for m in msg)
+        log.debug(f"Characters: \033[94m{len(msg)}\033[0m Tokens: \033[94m{num_tokens}\033[0m")
     if suffix:
         log.debug(suffix)
     if show_sep == "below":
@@ -1238,6 +1316,101 @@ def truncate_string(s, max_length=30, ellipsis="..."):
         return s
     part_length = (max_length - len(ellipsis)) // 2
     return f"{s[:part_length]}{ellipsis}{s[-part_length:]}"
+
+
+def _get_token_encoder():
+    """
+    Return a cached tiktoken encoder, or ``None`` if one cannot be loaded.
+
+    Resolution is deferred to first use: ``tiktoken.get_encoding`` downloads the
+    BPE vocabulary over HTTPS unless it is already in ``$TIKTOKEN_CACHE_DIR``,
+    so importing this module must not trigger it. Any failure (no tiktoken,
+    offline, upstream 5xx) is logged once and yields ``None``, which callers
+    treat as "estimate from character length" — sizing a prompt payload is never
+    worth raising into an in-flight conversation.
+    """
+    if "encoder" in _TOKEN_ENCODER_CACHE:
+        return _TOKEN_ENCODER_CACHE["encoder"]
+    try:
+        # Deferred so a missing tiktoken degrades to the character estimate
+        # rather than breaking the import.
+        import tiktoken  # noqa: PLC0415
+
+        encoder = tiktoken.get_encoding(TOKEN_ENCODING)
+    except Exception as e:
+        log.warning(
+            f"Could not load the {TOKEN_ENCODING!r} tokenizer ({type(e).__name__}: {e}); "
+            f"token counts will be estimated from character length at "
+            f"~{FALLBACK_CHARS_PER_TOKEN} chars/token."
+        )
+        encoder = None
+    _TOKEN_ENCODER_CACHE["encoder"] = encoder
+    return encoder
+
+
+def count_tokens(text: str) -> int:
+    """
+    Estimate how many tokens *text* occupies in an LLM prompt.
+
+    Counts with the :data:`TOKEN_ENCODING` tokenizer. Lumen also targets
+    Anthropic, Google, Mistral, Bedrock and LiteLLM models, whose tokenizers
+    differ, so this is an estimate for every provider — use it to size payloads,
+    not to predict billing. Falls back to a character-length estimate when the
+    tokenizer is unavailable.
+    """
+    if not text:
+        return 0
+    encoder = _get_token_encoder()
+    if encoder is None:
+        return math.ceil(len(text) / FALLBACK_CHARS_PER_TOKEN)
+    return len(encoder.encode(text, disallowed_special=()))
+
+
+def truncate_to_tokens(text: str, max_tokens: int, marker: str = "truncated") -> str:
+    """
+    Trim *text* to roughly *max_tokens*, cutting on a line boundary.
+
+    Prompt payloads are YAML, whitespace-aligned tables and markdown, where a
+    mid-line cut leaves a fragment the model may misread as data — so the text
+    is cut back to the last complete line that fits. The appended note reports
+    what was dropped, letting the model distinguish "this is everything" from
+    "there is more", rather than inferring it from a bare ellipsis.
+
+    Parameters
+    ----------
+    text : str
+        Text to trim.
+    max_tokens : int
+        Approximate token budget, per :func:`count_tokens`.
+    marker : str
+        Word used in the appended note.
+
+    Returns
+    -------
+    str
+        *text* unchanged when it already fits, otherwise the leading lines that
+        fit followed by ``... (truncated, showing N of M tokens)``.
+    """
+    total = count_tokens(text)
+    if total <= max_tokens:
+        return text
+
+    # Cut proportionally on characters first, then walk back a line at a time
+    # until the result plus its note fits. The first guess is usually right;
+    # the loop only corrects for uneven token density within the text.
+    note_budget = count_tokens(f"\n... ({marker}, showing {max_tokens} of {total} tokens)")
+    budget = max(max_tokens - note_budget, 1)
+    lines = text.split("\n")
+    keep = max(1, int(len(lines) * budget / total))
+    while keep > 1 and count_tokens("\n".join(lines[:keep])) > budget:
+        keep -= 1
+    kept = "\n".join(lines[:keep])
+    if count_tokens(kept) > budget:
+        # A single line exceeds the budget on its own; fall back to a character
+        # cut so we still respect the cap.
+        kept = kept[: max(1, int(len(kept) * budget / count_tokens(kept)))]
+    shown = count_tokens(kept)
+    return f"{kept}\n... ({marker}, showing {shown} of {total} tokens)"
 
 
 def collapse_indexed_columns(
@@ -1687,8 +1860,9 @@ def result_to_dataframe(result) -> pd.DataFrame | None:
     if isinstance(result, Source):
         return None
 
-    # SourceResult from controls — extract the DataFrame from the first source
-    from .controls.ingest.result import SourceResult
+    # SourceResult from controls — extract the DataFrame from the first source.
+    # Deferred: the controls package reaches .editors, which imports this module.
+    from .controls.ingest.result import SourceResult  # noqa: PLC0415
     if isinstance(result, SourceResult):
         if not result.sources or not result.table:
             return None
@@ -1914,7 +2088,7 @@ def normalize_vegalite_spec(
     """
     if editor_type is None:
         # Imported lazily to avoid an editors -> utils import cycle.
-        from .editors import VegaLiteEditor
+        from .editors import VegaLiteEditor  # noqa: PLC0415
         editor_type = VegaLiteEditor
 
     # Remove wrapper properties that aren't part of Vega-Lite spec
